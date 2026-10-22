@@ -1,0 +1,20 @@
+[Unit]
+Description=Knowledge Base Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=knowledgebase
+WorkingDirectory=/opt/knowledge-base
+EnvironmentFile=/etc/knowledge-base/env
+ExecStart=/opt/knowledge-base/knowledge-base
+Restart=on-failure
+RestartSec=5
+ProtectSystem=strict
+# /var/log/knowledge-base 需提前创建并授予服务用户写权限，LOG_DIR 指向该目录；
+# 前缀 "-" 允许目录尚未创建时服务仍能启动。
+ReadWritePaths=-/data/uploads -/var/log/knowledge-base
+
+[Install]
+WantedBy=multi-user.target

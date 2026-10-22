@@ -1,0 +1,23 @@
+{
+  "name": "Knowledge Base",
+  "name_zh": "知识库管理助手",
+  "name_en": "Knowledge Base Assistant",
+  "description": "Search project records, hazards, and audit history.",
+  "description_zh": "通过自然语言检索知识库档案、项目画像、隐患和审核记录。",
+  "description_en": "Search knowledge base records, project profiles, hazards, and audit history with natural language.",
+  "source": "knowledge-base",
+  "type": "mcp",
+  "auth_mode": "token",
+  "version": "0.1.0",
+  "minWorkbuddyVersion": "4.24.0",
+  "examples_zh": [
+    "列出档案系统里的重点项目",
+    "查询项目 U001 目前未整改的隐患",
+    "搜索项目 U001 档案中关于设备维护的要求"
+  ],
+  "examples_en": [
+    "List the projects in the archive.",
+    "Show open hazards for unit U001.",
+    "Search unit U001 records for equipment maintenance requirements."
+  ]
+}

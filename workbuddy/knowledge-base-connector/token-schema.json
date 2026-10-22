@@ -1,0 +1,17 @@
+{
+  "title": "知识库管理服务连接配置",
+  "title_en": "Knowledge Base Connection",
+  "description": "填写管理员提供的知识库管理 MCP 访问令牌。令牌仅保存在本机。",
+  "description_en": "Enter the Knowledge Base MCP access token provided by your administrator. The token is stored locally.",
+  "fields": [
+    {
+      "key": "KNOWLEDGE_BASE_TOKEN",
+      "label": "访问令牌",
+      "label_en": "Access token",
+      "type": "password",
+      "required": true,
+      "placeholder": "由知识库管理服务管理员提供",
+      "description": "用于访问知识库管理 MCP 服务。"
+    }
+  ]
+}

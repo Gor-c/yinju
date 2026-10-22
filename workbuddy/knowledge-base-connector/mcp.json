@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "knowledge-base": {
+      "type": "streamableHttp",
+      "url": "https://YOUR_KNOWLEDGE_BASE_HOST/mcp",
+      "headers": {
+        "Authorization": "Bearer ${KNOWLEDGE_BASE_TOKEN}"
+      },
+      "timeout": 30000
+    }
+  }
+}

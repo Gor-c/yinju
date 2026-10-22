@@ -1,0 +1,13 @@
+.env
+bin/
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo
+frontend/*.log
+frontend/_tmp_*
+data/uploads/
+logs*/
+tmp/
+.pnpm-store/
+*.log
+.DS_Store
