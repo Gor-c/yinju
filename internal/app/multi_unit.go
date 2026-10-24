@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -156,13 +155,6 @@ func (s *Server) searchChunksScoped(ctx context.Context, ids []string, names map
 	if len(ids) == 0 {
 		return []scopedMatch{}, nil
 	}
-	vectors, err := s.embedContext(ctx, []string{query})
-	if err != nil {
-		return nil, err
-	}
-	if len(vectors) == 0 {
-		return nil, fmt.Errorf("embedding API returned no vectors")
-	}
 	// 文档是检索单位：把知识库翻译成 doc_id 集合后一次搜索，
 	// 再按归属关系给命中结果标注来源知识库。
 	docIDs, owner, idErr := s.docIDsForUnitsWithOwner(ctx, ids)
@@ -172,7 +164,8 @@ func (s *Server) searchChunksScoped(ctx context.Context, ids []string, names map
 	if len(docIDs) == 0 {
 		return []scopedMatch{}, nil
 	}
-	matches, searchErr := s.vectors.Search(ctx, docIDs, vectors[0], k)
+	// 向量 + 关键词并行召回，融合后重排，低分片段在这里就被丢弃。
+	matches, searchErr := s.hybridSearch(ctx, docIDs, query, k)
 	if searchErr != nil {
 		return nil, searchErr
 	}
@@ -181,7 +174,7 @@ func (s *Server) searchChunksScoped(ctx context.Context, ids []string, names map
 		unitID := owner[match.DocID]
 		all = append(all, scopedMatch{UnitID: unitID, UnitName: names[unitID], Match: match})
 	}
-	sort.Slice(all, func(i, j int) bool { return all[i].Match.Distance < all[j].Match.Distance })
+	// hybridSearch 已按融合/重排分排序，这里只补齐来源知识库。
 	if len(all) > k {
 		all = all[:k]
 	}

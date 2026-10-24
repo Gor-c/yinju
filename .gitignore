@@ -1,11 +1,19 @@
 .env
+
+# 实例配置由页面写入，含明文数据库密码；备份文件同样不能进仓库。
+# 这里不能只忽略 data/ 整体——deploy/ 之类若将来需要样本文件会互相牵连，
+# 所以逐项列出数据目录下会产生的东西。
+data/instance.env
+data/instance.env.*
+data/brand/
+data/uploads/
+
 bin/
 frontend/node_modules/
 frontend/dist/
 frontend/*.tsbuildinfo
 frontend/*.log
 frontend/_tmp_*
-data/uploads/
 logs*/
 tmp/
 .pnpm-store/

@@ -18,8 +18,8 @@ func NewPGVector(db *pgxpool.Pool) *PGVectorStore { return &PGVectorStore{db: db
 
 func (s *PGVectorStore) Upsert(ctx context.Context, chunks []Chunk) error {
 	for _, chunk := range chunks {
-		if len(chunk.Embedding) != embeddingDim() {
-			return fmt.Errorf("embedding dimension is %d, expected %d", len(chunk.Embedding), embeddingDim())
+		if len(chunk.Embedding) != EmbeddingDim() {
+			return fmt.Errorf("embedding dimension is %d, expected %d", len(chunk.Embedding), EmbeddingDim())
 		}
 		if chunk.DocID == "" {
 			return errors.New("docID is required")
@@ -40,7 +40,7 @@ func (s *PGVectorStore) Search(ctx context.Context, docIDs []string, embedding [
 	if len(docIDs) == 0 || limit < 1 {
 		return []Match{}, nil
 	}
-	rows, err := s.db.Query(ctx, `SELECT c.doc_id, COALESCE(d.filename,''), COALESCE(d.doc_type,''),
+	rows, err := s.db.Query(ctx, `SELECT c.doc_id, COALESCE(d.filename,''), COALESCE(d.doc_type,''), c.chunk_index,
 		c.content, c.embedding <=> $1::vector AS distance
 		FROM doc_chunks c
 		LEFT JOIN documents d ON d.doc_id = c.doc_id
@@ -53,7 +53,7 @@ func (s *PGVectorStore) Search(ctx context.Context, docIDs []string, embedding [
 	matches := make([]Match, 0, limit)
 	for rows.Next() {
 		var match Match
-		if err := rows.Scan(&match.DocID, &match.Filename, &match.DocType, &match.Content, &match.Distance); err != nil {
+		if err := rows.Scan(&match.DocID, &match.Filename, &match.DocType, &match.ChunkIndex, &match.Content, &match.Distance); err != nil {
 			return nil, err
 		}
 		matches = append(matches, match)

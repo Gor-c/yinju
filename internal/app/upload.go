@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -25,15 +26,21 @@ import (
 	"github.com/ledongthuc/pdf"
 	"golang.org/x/text/unicode/norm"
 	"knowledge-base/internal/logging"
+	"knowledge-base/internal/rag"
 	"knowledge-base/internal/vectorstore"
 )
 
-// embeddingDimensions 可通过 EMBED_DIMENSIONS 覆盖；更换维度后必须重建索引。
-var embeddingDimensions = envIntValue("EMBED_DIMENSIONS", 1024)
+// embeddingDimensions 转发到 vectorstore，保持全仓库单一事实源。
+//
+// 用函数而不是包级变量：包级变量在 init 阶段求值，早于 main 里的 .env 加载，
+// 会把 EMBED_DIMENSIONS 静默读成默认值，造成「配置了却不起作用」。
+func embeddingDimensions() int { return vectorstore.EmbeddingDim() }
 
+// 切块尺寸的默认值。实际生效值来自 retrieval_settings（页面可改，DB 优先），
+// 这里的常量只用于建表默认值和环境变量兜底。
 const (
-	chunkSize            = 1800
-	chunkOverlap         = 240
+	defaultChunkSize     = 1800
+	defaultChunkOverlap  = 240
 	embedBatchSize       = 16
 	defaultMaxUploadMB   = 50
 	defaultIndexTimeoutM = 15
@@ -54,6 +61,28 @@ func maxUploadBytes() int64 {
 		mb = defaultMaxUploadMB
 	}
 	return int64(mb) << 20
+}
+
+// ingestConfig 把上传与切块的真实限制交给前端，避免页面文案自己写死一份。
+// 这类数字最容易腐烂：服务端改了配置，界面还在承诺旧值，用户按界面判断
+// 就会被拒或误解成本。
+func (s *Server) ingestConfig(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"max_upload_mb": maxUploadBytes() >> 20,
+		"chunk_size":    s.chunkSize(),
+		"chunk_overlap": s.chunkOverlap(),
+		"extensions":    supportedExtensionList(),
+	})
+}
+
+// supportedExtensionList 返回去点的扩展名，按字母序，供前端直接展示。
+func supportedExtensionList() []string {
+	out := make([]string, 0, len(supportedExtensions))
+	for ext := range supportedExtensions {
+		out = append(out, strings.TrimPrefix(ext, "."))
+	}
+	sort.Strings(out)
+	return out
 }
 
 func indexTimeout() time.Duration {
@@ -256,22 +285,49 @@ func (s *Server) indexFile(ctx context.Context, j *Job, path string) {
 	// 已索引过的内容直接复用，跳过重复的解析结果与向量化。
 	docID := docIDForText(text)
 	if existing, err := s.documentByID(ctx, docID); err == nil && existing.ChunkCount > 0 {
-		if err := s.linkDocumentUnit(ctx, docID, view.UnitID); err != nil {
-			s.failJob(j, err.Error())
+		// 复用旧向量之前先确认两件事，任一不满足都必须重建：
+		//   1. 向量空间没变（换了嵌入模型还复用 = 新旧向量混算）
+		//   2. 向量库里确实还有这份文档（重建索引清空过库时必须自愈）
+		reusable, identityErr := s.documentIdentityMatches(ctx, docID)
+		if identityErr != nil {
+			logging.App().Warn("document_identity_check_failed", "doc_id", docID, "error", identityErr)
+		}
+		if reusable && s.vectors != nil {
+			actual, countErr := s.vectors.Count(ctx, []string{docID})
+			if countErr != nil {
+				logging.App().Warn("document_vector_count_failed", "doc_id", docID, "error", countErr)
+			} else if actual == 0 {
+				// documents 说有索引、向量库却是空的：复用会得到一个
+				// 「看起来完成、实际检索不到」的索引，比失败更难排查。
+				logging.App().Warn("document_vectors_missing", "doc_id", docID, "declared", existing.ChunkCount)
+				reusable = false
+			}
+		}
+		if reusable {
+			if err := s.linkDocumentUnit(ctx, docID, view.UnitID); err != nil {
+				s.failJob(j, err.Error())
+				return
+			}
+			if err := s.pruneReplacedDocuments(ctx, view.UnitID, view.Filename, docID); err != nil {
+				logger.Warn("document_prune_failed", "doc_id", docID, "error", err)
+			}
+			j.setChunks(existing.ChunkCount)
+			s.updateJobPhase(j, "done", phaseDone, 100, "文档已存在，复用已有索引")
+			logger.Info("index_job_reused_document", "doc_id", docID, "chunks", existing.ChunkCount)
 			return
 		}
-		if err := s.pruneReplacedDocuments(ctx, view.UnitID, view.Filename, docID); err != nil {
-			logger.Warn("document_prune_failed", "doc_id", docID, "error", err)
-		}
-		j.setChunks(existing.ChunkCount)
-		s.updateJobPhase(j, "done", phaseDone, 100, "文档已存在，复用已有索引")
-		logger.Info("index_job_reused_document", "doc_id", docID, "chunks", existing.ChunkCount)
-		return
+		// 身份不一致：落到下面重新切块与向量化，覆盖旧索引。
+		logger.Warn("document_reindex_identity_changed", "doc_id", docID, "filename", view.Filename)
 	}
-	chunks := split(text, chunkSize, chunkOverlap)
-	if len(chunks) == 0 {
+	chunker := rag.FixedChunker{Size: s.chunkSize(), Overlap: s.chunkOverlap()}
+	parsed := chunker.Chunk(text)
+	if len(parsed) == 0 {
 		s.failJob(j, "文档未提取到文本")
 		return
+	}
+	chunks := make([]string, len(parsed))
+	for i, chunk := range parsed {
+		chunks[i] = chunk.Content
 	}
 	logger.Info("index_job_doc_resolved", "doc_id", docID)
 	s.updateJobPhase(j, "running", phaseIndex, 25, "调用 BGE-M3 生成向量")
@@ -292,8 +348,8 @@ func (s *Server) indexFile(ctx context.Context, j *Job, path string) {
 		}
 		out := make([]vectorstore.Chunk, 0, len(batch))
 		for i, vec := range vecs {
-			if len(vec) != embeddingDimensions {
-				s.failJob(j, fmt.Sprintf("embedding dimension is %d, expected %d", len(vec), embeddingDimensions))
+			if len(vec) != embeddingDimensions() {
+				s.failJob(j, fmt.Sprintf("embedding dimension is %d, expected %d", len(vec), embeddingDimensions()))
 				return
 			}
 			out = append(out, vectorstore.Chunk{
@@ -305,6 +361,10 @@ func (s *Server) indexFile(ctx context.Context, j *Job, path string) {
 			s.failJob(j, err.Error())
 			return
 		}
+		// 关键词镜像与向量同批写入，混合检索才有数据可用。
+		if err := s.syncChunkText(ctx, docID, out); err != nil {
+			logging.App().Warn("chunk_text_write_failed", "doc_id", docID, "error", err)
+		}
 		j.setChunks(end)
 		s.updateJobPhase(j, "running", phaseIndex, 25+70*end/len(chunks), "写出向量索引")
 	}
@@ -313,10 +373,17 @@ func (s *Server) indexFile(ctx context.Context, j *Job, path string) {
 		s.failJob(j, err.Error())
 		return
 	}
-	if err := s.recordDocument(ctx, view, docID, path, text, len(chunks)); err != nil {
+	if err := s.deleteChunkTextFrom(ctx, docID, len(chunks)); err != nil {
+		logging.App().Warn("chunk_text_prune_failed", "doc_id", docID, "error", err)
+	}
+	if err := s.recordDocument(ctx, view, docID, path, text, len(chunks), chunker.Name()); err != nil {
 		logger.Error("document_record_failed", "error", err)
 		s.failJob(j, fmt.Sprintf("文档记录失败: %v", err))
 		return
+	}
+	// 索引完成即抽章节：页面上的「内容框架」不必等用户手动点。
+	if _, err := s.extractDocOutline(ctx, docID, view.Filename); err != nil {
+		logging.App().Warn("outline_extract_failed", "doc_id", docID, "error", err)
 	}
 	s.updateJobPhase(j, "done", phaseDone, 100, "索引完成")
 	logger.Info("index_job_completed",
@@ -327,14 +394,21 @@ func (s *Server) indexFile(ctx context.Context, j *Job, path string) {
 
 // recordDocument 以内容哈希为身份写入文档，并把文档挂到当前知识库下。
 // 文档可能被多个知识库共用，因此这里只更新文档自身的元数据。
-func (s *Server) recordDocument(ctx context.Context, view jobView, docID, path, text string, chunkCount int) error {
-	_, err := s.db.Exec(ctx, `INSERT INTO documents(doc_id,filename,doc_type,job_id,chunk_count,content_hash,file_path,source_url,indexed_at)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,now())
+//
+// 同时登记「这份向量是用什么建的」：embedding_model + embedding_dim + chunker。
+// 没有这三个字段，换模型或换切块策略后旧索引无法被识别，只能靠人记得重建。
+func (s *Server) recordDocument(ctx context.Context, view jobView, docID, path, text string, chunkCount int, chunkerName string) error {
+	cfg := s.modelConfigFor(ctx)
+	_, err := s.db.Exec(ctx, `INSERT INTO documents(doc_id,filename,doc_type,job_id,chunk_count,content_hash,file_path,source_url,embedding_model,embedding_dim,chunker,indexed_at)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now())
 		ON CONFLICT(doc_id) DO UPDATE
 		SET doc_type=EXCLUDED.doc_type,job_id=EXCLUDED.job_id,
 			chunk_count=EXCLUDED.chunk_count,content_hash=EXCLUDED.content_hash,
-			file_path=EXCLUDED.file_path,source_url=EXCLUDED.source_url,indexed_at=now()`,
-		docID, view.Filename, view.DocType, view.ID, chunkCount, contentHash(text), path, view.SourceURL)
+			file_path=EXCLUDED.file_path,source_url=EXCLUDED.source_url,
+			embedding_model=EXCLUDED.embedding_model,embedding_dim=EXCLUDED.embedding_dim,
+			chunker=EXCLUDED.chunker,indexed_at=now()`,
+		docID, view.Filename, view.DocType, view.ID, chunkCount, contentHash(text), path, view.SourceURL,
+		cfg.EmbedModel, vectorstore.EmbeddingDim(), chunkerName)
 	if err != nil {
 		return err
 	}
@@ -651,35 +725,6 @@ func extract(path string) (string, error) {
 	default:
 		return "", fmt.Errorf("unsupported document type: %s", ext)
 	}
-}
-
-func split(text string, size, overlap int) []string {
-	if size <= 0 {
-		return nil
-	}
-	if overlap < 0 {
-		overlap = 0
-	}
-	if overlap >= size {
-		overlap = size / 4
-	}
-	r := []rune(strings.TrimSpace(text))
-	out := []string{}
-	for start := 0; start < len(r); {
-		end := start + size
-		if end > len(r) {
-			end = len(r)
-		}
-		chunk := strings.TrimSpace(string(r[start:end]))
-		if chunk != "" {
-			out = append(out, chunk)
-		}
-		if end == len(r) {
-			break
-		}
-		start = end - overlap
-	}
-	return out
 }
 
 func docxText(b []byte) (string, error) {

@@ -56,7 +56,7 @@ func (s *ChromaStore) ensureCollection(ctx context.Context) error {
 	var result struct {
 		ID string `json:"id"`
 	}
-	err := s.request(ctx, http.MethodPost, s.rootPath()+"/collections", map[string]any{
+	err := s.doRequest(ctx, http.MethodPost, s.rootPath()+"/collections", map[string]any{
 		"name":          s.name,
 		"get_or_create": true,
 		"metadata":      map[string]any{"hnsw:space": "cosine", "application": "knowledge-base"},
@@ -103,8 +103,8 @@ func (s *ChromaStore) Upsert(ctx context.Context, chunks []Chunk) error {
 	embeddings := make([][]float64, 0, len(chunks))
 	metadatas := make([]map[string]any, 0, len(chunks))
 	for _, chunk := range chunks {
-		if len(chunk.Embedding) != embeddingDim() {
-			return fmt.Errorf("embedding dimension is %d, expected %d", len(chunk.Embedding), embeddingDim())
+		if len(chunk.Embedding) != EmbeddingDim() {
+			return fmt.Errorf("embedding dimension is %d, expected %d", len(chunk.Embedding), EmbeddingDim())
 		}
 		// Chunk identity now follows the document, not (unit, filename).
 		sum := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d", chunk.DocID, chunk.Index)))
@@ -121,8 +121,8 @@ func (s *ChromaStore) Upsert(ctx context.Context, chunks []Chunk) error {
 }
 
 func (s *ChromaStore) Search(ctx context.Context, docIDs []string, embedding []float64, limit int) ([]Match, error) {
-	if len(embedding) != embeddingDim() {
-		return nil, fmt.Errorf("embedding dimension is %d, expected %d", len(embedding), embeddingDim())
+	if len(embedding) != EmbeddingDim() {
+		return nil, fmt.Errorf("embedding dimension is %d, expected %d", len(embedding), EmbeddingDim())
 	}
 	if limit < 1 || len(docIDs) == 0 {
 		return []Match{}, nil
@@ -153,6 +153,9 @@ func (s *ChromaStore) Search(ctx context.Context, docIDs []string, embedding []f
 			match.DocID, _ = result.Metadatas[0][i]["doc_id"].(string)
 			match.Filename, _ = result.Metadatas[0][i]["filename"].(string)
 			match.DocType, _ = result.Metadatas[0][i]["doc_type"].(string)
+			if idx, ok := result.Metadatas[0][i]["chunk_index"].(float64); ok {
+				match.ChunkIndex = int(idx)
+			}
 		}
 		matches = append(matches, match)
 	}
@@ -278,7 +281,47 @@ func (s *ChromaStore) Reset(ctx context.Context) error {
 	return errors.New("清空向量集合失败：数据量超过预期上限")
 }
 
+// chromaHTTPError 保留状态码，让上层能区分「集合 ID 失效」和别的失败。
+type chromaHTTPError struct {
+	Method string
+	Path   string
+	Status int
+	Body   string
+}
+
+func (e *chromaHTTPError) Error() string {
+	return fmt.Sprintf("Chroma API %s %s returned %d: %s", e.Method, e.Path, e.Status, e.Body)
+}
+
+// request 在集合 ID 失效时自愈一次。
+//
+// Chroma 端的集合被删除重建后 ID 会变，而本进程只在启动时解析一次。
+// 不处理的话，运行中的服务会对着旧 ID 一直 404：上传报错、检索空结果，
+// 必须重启才恢复。这里遇到 404 就重新解析 ID 并重试一次。
 func (s *ChromaStore) request(ctx context.Context, method, path string, body, output any) error {
+	err := s.doRequest(ctx, method, path, body, output)
+	if err == nil {
+		return nil
+	}
+	var httpErr *chromaHTTPError
+	if !errors.As(err, &httpErr) || httpErr.Status != http.StatusNotFound {
+		return err
+	}
+	stale := s.collectionID
+	if stale == "" {
+		return err
+	}
+	if ensureErr := s.ensureCollection(ctx); ensureErr != nil {
+		return err
+	}
+	if s.collectionID == stale || s.collectionID == "" {
+		return err
+	}
+	retryPath := strings.ReplaceAll(path, url.PathEscape(stale), url.PathEscape(s.collectionID))
+	return s.doRequest(ctx, method, retryPath, body, output)
+}
+
+func (s *ChromaStore) doRequest(ctx context.Context, method, path string, body, output any) error {
 	var reader *bytes.Reader
 	if body == nil {
 		reader = bytes.NewReader(nil)
@@ -306,7 +349,7 @@ func (s *ChromaStore) request(ctx context.Context, method, path string, body, ou
 		return err
 	}
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return fmt.Errorf("Chroma API %s %s returned %d: %s", method, path, res.StatusCode, raw.String())
+		return &chromaHTTPError{Method: method, Path: path, Status: res.StatusCode, Body: raw.String()}
 	}
 	if output != nil {
 		return json.Unmarshal(raw.Bytes(), output)

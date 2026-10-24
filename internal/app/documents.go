@@ -60,6 +60,18 @@ func (s *Server) ensureDocumentSchema(ctx context.Context) {
 		logging.App().Warn("document_schema_failed", "step", "unit_index", "error", err)
 	}
 
+	// 向量身份三列：换嵌入模型或换切块策略后，旧索引必须能被识别出来。
+	// 没有这三列，混用向量空间是静默的——不报错，只表现为检索变差。
+	for _, column := range []struct{ name, ddl string }{
+		{"embedding_model", `ALTER TABLE documents ADD COLUMN IF NOT EXISTS embedding_model text NOT NULL DEFAULT ''`},
+		{"embedding_dim", `ALTER TABLE documents ADD COLUMN IF NOT EXISTS embedding_dim integer NOT NULL DEFAULT 0`},
+		{"chunker", `ALTER TABLE documents ADD COLUMN IF NOT EXISTS chunker text NOT NULL DEFAULT ''`},
+	} {
+		if _, err := s.db.Exec(ctx, column.ddl); err != nil {
+			logging.App().Warn("document_schema_failed", "step", "add_"+column.name, "error", err)
+		}
+	}
+
 	// 1) 补 doc_id 列
 	if !s.columnExists(ctx, "documents", "doc_id") {
 		if _, err := s.db.Exec(ctx, `ALTER TABLE documents ADD COLUMN doc_id text`); err != nil {
@@ -262,6 +274,9 @@ func (s *Server) cleanupOrphanDocument(ctx context.Context, docID string) (bool,
 		if err := s.vectors.DeleteDoc(ctx, docID); err != nil {
 			logging.App().Warn("document_vectors_delete_failed", "doc_id", docID, "error", err)
 		}
+	}
+	if err := s.deleteChunkText(ctx, docID); err != nil {
+		logging.App().Warn("chunk_text_delete_failed", "doc_id", docID, "error", err)
 	}
 	// 重建索引时新旧文档可能共用同一份源文件，删除前确认没有其他记录引用。
 	if filePath != "" && !s.fileReferencedByOtherDoc(ctx, filePath, docID) {

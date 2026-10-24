@@ -21,8 +21,12 @@ type Match struct {
 	DocID    string
 	Filename string
 	DocType  string
-	Content  string
-	Distance float64
+	// ChunkIndex 定位到文档内的第几块，用于引用跳转与混合检索去重。
+	ChunkIndex int
+	Content    string
+	Distance   float64
+	// Score 是混合检索融合分或重排分，只在应用层填写；向量库本身不设置。
+	Score float64
 }
 
 // Store is the replacement boundary for pgvector, Chroma, or another vector DB.

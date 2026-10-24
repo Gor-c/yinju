@@ -88,8 +88,17 @@ CREATE TABLE IF NOT EXISTS documents (
   chunk_count integer NOT NULL DEFAULT 0,
   content_hash text NOT NULL DEFAULT '',
   file_path text NOT NULL DEFAULT '',
+  -- 向量身份：这份文档的向量是用哪个嵌入模型、多少维、哪种切块策略建的。
+  -- 检索前比对，不一致就拒绝服务，避免两个向量空间静默混算。
+  embedding_model text NOT NULL DEFAULT '',
+  embedding_dim integer NOT NULL DEFAULT 0,
+  chunker text NOT NULL DEFAULT '',
   indexed_at timestamptz NOT NULL DEFAULT now()
 );
+-- 已有库升级：补齐向量身份列（可重复执行）。
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS embedding_model text NOT NULL DEFAULT '';
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS embedding_dim integer NOT NULL DEFAULT 0;
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS chunker text NOT NULL DEFAULT '';
 CREATE UNIQUE INDEX IF NOT EXISTS documents_content_hash_idx ON documents(content_hash) WHERE content_hash <> '';
 
 -- 文档 ↔ 知识库 多对多；从某个知识库移除只删这一行。
@@ -172,6 +181,9 @@ CREATE TABLE IF NOT EXISTS model_settings (
   llm_base_url text NOT NULL DEFAULT '',
   llm_api_key text NOT NULL DEFAULT '',
   llm_model text NOT NULL DEFAULT '',
+  rerank_base_url text NOT NULL DEFAULT '',
+  rerank_api_key text NOT NULL DEFAULT '',
+  rerank_model text NOT NULL DEFAULT '',
   updated_at timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT model_settings_single_row CHECK (id = 1)
 );
@@ -187,6 +199,7 @@ CREATE TABLE IF NOT EXISTS model_providers (
   api_key text NOT NULL DEFAULT '',
   llm_model text NOT NULL DEFAULT '',
   embed_model text NOT NULL DEFAULT '',
+  rerank_model text NOT NULL DEFAULT '',
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
 );
@@ -195,7 +208,7 @@ CREATE TABLE IF NOT EXISTS model_selection (
   role text PRIMARY KEY,
   provider_id bigint NOT NULL DEFAULT 0,
   updated_at timestamptz NOT NULL DEFAULT now(),
-  CONSTRAINT model_selection_role_check CHECK (role IN ('llm','embed'))
+  CONSTRAINT model_selection_role_check CHECK (role IN ('llm','embed','rerank'))
 );
 
 -- 实体知识图谱（P1：从 chunk 文本抽取，本地 LLM 完成）。
@@ -262,3 +275,87 @@ CREATE TABLE IF NOT EXISTS web_search_settings (
 -- Imported web pages keep their origin URL, both on the job and the document.
 ALTER TABLE index_jobs ADD COLUMN IF NOT EXISTS source_url text NOT NULL DEFAULT '';
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS source_url text NOT NULL DEFAULT '';
+
+-- ========== 运行参数与留痕 ==========
+-- 检索 / 切块 / 记忆的运行参数。数据库优先于环境变量，页面可改，改完立即生效。
+CREATE TABLE IF NOT EXISTS retrieval_settings (
+  id smallint PRIMARY KEY DEFAULT 1,
+  vector_k integer NOT NULL DEFAULT 30,
+  keyword_k integer NOT NULL DEFAULT 30,
+  fusion_k integer NOT NULL DEFAULT 20,
+  max_distance double precision NOT NULL DEFAULT 0.55,
+  min_overlap double precision NOT NULL DEFAULT 0.28,
+  min_score double precision NOT NULL DEFAULT 0.1,
+  chunk_size integer NOT NULL DEFAULT 1800,
+  chunk_overlap integer NOT NULL DEFAULT 240,
+  memory_messages integer NOT NULL DEFAULT 20,
+  memory_runes integer NOT NULL DEFAULT 4000,
+  outline_enabled boolean NOT NULL DEFAULT true,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- 每次检索留痕：这一问为什么答、为什么拒答，事后能查。
+CREATE TABLE IF NOT EXISTS retrieval_traces (
+  id bigserial PRIMARY KEY,
+  request_id text NOT NULL DEFAULT '',
+  query text NOT NULL DEFAULT '',
+  doc_count integer NOT NULL DEFAULT 0,
+  unit_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
+  vector_hits integer NOT NULL DEFAULT 0,
+  keyword_hits integer NOT NULL DEFAULT 0,
+  fused integer NOT NULL DEFAULT 0,
+  reranked integer NOT NULL DEFAULT 0,
+  kept integer NOT NULL DEFAULT 0,
+  no_evidence boolean NOT NULL DEFAULT false,
+  degraded text NOT NULL DEFAULT '',
+  duration_ms integer NOT NULL DEFAULT 0,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS retrieval_traces_created_idx ON retrieval_traces(created_at DESC);
+
+-- 大纲抽取留痕：抽了什么、用哪版规则、什么时候抽的。
+CREATE TABLE IF NOT EXISTS doc_outlines (
+  doc_id text PRIMARY KEY,
+  filename text NOT NULL DEFAULT '',
+  entries jsonb NOT NULL DEFAULT '[]'::jsonb,
+  rule_version text NOT NULL DEFAULT '',
+  extracted_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- 配置变更留痕：哪个参数、从多少改到多少。
+CREATE TABLE IF NOT EXISTS setting_changes (
+  id bigserial PRIMARY KEY,
+  key text NOT NULL,
+  old_value text NOT NULL DEFAULT '',
+  new_value text NOT NULL DEFAULT '',
+  source text NOT NULL DEFAULT 'ui',
+  changed_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS setting_changes_changed_idx ON setting_changes(changed_at DESC);
+
+-- ========== 会话记忆 ==========
+-- 三层记忆：最近 N 条原文（由 retrieval_settings 控制）+ 滚动摘要 + 原子事实。
+-- 摘要覆盖「已经滑出窗口」的部分，避免长对话里早期约束静默丢失。
+ALTER TABLE agent_conversations ADD COLUMN IF NOT EXISTS summary text NOT NULL DEFAULT '';
+ALTER TABLE agent_conversations ADD COLUMN IF NOT EXISTS summary_upto bigint NOT NULL DEFAULT 0;
+ALTER TABLE agent_conversations ADD COLUMN IF NOT EXISTS summary_at timestamptz;
+
+-- 用户明确提出的约束/偏好/结论。source_message_id 指回原话，便于核对。
+CREATE TABLE IF NOT EXISTS agent_memory_facts (
+  id bigserial PRIMARY KEY,
+  conversation_id text NOT NULL REFERENCES agent_conversations(conversation_id) ON DELETE CASCADE,
+  kind text NOT NULL DEFAULT 'constraint',
+  content text NOT NULL,
+  source_message_id bigint NOT NULL DEFAULT 0,
+  confidence real NOT NULL DEFAULT 0.8,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS agent_memory_facts_unique ON agent_memory_facts(conversation_id, content);
+CREATE INDEX IF NOT EXISTS agent_memory_facts_conv_idx ON agent_memory_facts(conversation_id, id DESC);
+
+-- 冲突消解：事实按 topic 分组，同主题的新说法让旧说法失效（active=false），
+-- 但不删除——记忆页要能回答「这条为什么不再生效」。
+ALTER TABLE agent_memory_facts ADD COLUMN IF NOT EXISTS topic text NOT NULL DEFAULT '';
+ALTER TABLE agent_memory_facts ADD COLUMN IF NOT EXISTS active boolean NOT NULL DEFAULT true;
+ALTER TABLE agent_memory_facts ADD COLUMN IF NOT EXISTS superseded_by bigint;
+ALTER TABLE agent_memory_facts ADD COLUMN IF NOT EXISTS superseded_at timestamptz;

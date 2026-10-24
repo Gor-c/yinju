@@ -9,8 +9,23 @@ import (
 )
 
 func main() {
-	// 先加载 .env，再初始化日志，保证 LOG_* 配置也能从 .env 读取。
-	// 已存在的环境变量优先，部署时由 systemd/容器注入的配置不会被覆盖。
+	// 配置加载顺序决定优先级。loadEnvFile 对已存在的变量会跳过，
+	// 所以「先加载的赢」：
+	//   1. 进程环境变量（systemd / 容器注入，天然最高）
+	//   2. data/instance.env —— 页面上保存的实例配置
+	//   3. .env —— 人工维护的部署配置
+	//   4. 代码默认值
+	// 页面配置放在 .env 之前，是因为用户点了保存就该以它为准；
+	// 而 .env 保留为兜底，删掉 instance.env 即可回到人工配置。
+	instancePath := envOr("INSTANCE_ENV_FILE", "data/instance.env")
+	if loaded, found, err := loadEnvFile(instancePath); err != nil {
+		// 这里先不进日志系统，用 stderr 说明；接着仍继续启动，
+		// 让 .env 接管，避免一个坏文件让服务完全起不来。
+		log.Printf("instance config failed, falling back to .env: path=%s err=%v", instancePath, err)
+	} else if found && loaded > 0 {
+		log.Printf("instance config loaded: path=%s vars=%d", instancePath, loaded)
+	}
+
 	envPath := envOr("ENV_FILE", ".env")
 	loadedEnvVars, envFileFound, envErr := loadEnvFile(envPath)
 

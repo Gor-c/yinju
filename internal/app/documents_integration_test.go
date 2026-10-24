@@ -55,7 +55,7 @@ func TestDocumentSharingIntegration(t *testing.T) {
 	}
 
 	view := jobView{ID: "job-it", UnitID: unitA, DocType: "制度", Filename: "共享文档.txt"}
-	if err := s.recordDocument(ctx, view, docID, "/tmp/it-shared.txt", text, 3); err != nil {
+	if err := s.recordDocument(ctx, view, docID, "/tmp/it-shared.txt", text, 3, "fixed"); err != nil {
 		t.Fatalf("record document: %v", err)
 	}
 	defer func() {
@@ -147,11 +147,11 @@ func TestDocumentReplacementIntegration(t *testing.T) {
 	staleIDs = append(staleIDs, oldID, newID)
 
 	view := jobView{ID: "job-r1", UnitID: unitID, DocType: "制度", Filename: "同名文档.txt"}
-	if err := s.recordDocument(ctx, view, oldID, "/tmp/it-old.txt", "第一版内容", 1); err != nil {
+	if err := s.recordDocument(ctx, view, oldID, "/tmp/it-old.txt", "第一版内容", 1, "fixed"); err != nil {
 		t.Fatalf("record v1: %v", err)
 	}
 	view.ID = "job-r2"
-	if err := s.recordDocument(ctx, view, newID, "/tmp/it-new.txt", "第二版内容", 2); err != nil {
+	if err := s.recordDocument(ctx, view, newID, "/tmp/it-new.txt", "第二版内容", 2, "fixed"); err != nil {
 		t.Fatalf("record v2: %v", err)
 	}
 

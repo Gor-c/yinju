@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"knowledge-base/internal/logging"
+	"knowledge-base/internal/rag"
 	"knowledge-base/internal/vectorstore"
 	"knowledge-base/internal/websearch"
 )
@@ -45,6 +46,12 @@ type Server struct {
 	webCfg    webSearchConfig
 	webAt     time.Time
 	webClient *websearch.Client
+
+	// runtimeCfg 缓存当前生效的运行参数（检索/切块/记忆），
+	// 带短 TTL，避免每次检索都读库；保存后主动失效。
+	runtimeMu  sync.RWMutex
+	runtimeCfg runtimeConfig
+	runtimeAt  time.Time
 }
 
 // serverStartedAt identifies this process in 404 responses, so a caller hitting
@@ -74,14 +81,28 @@ func New() (*Server, error) {
 		s.workerWake = make(chan struct{}, 1)
 		// 多来源模型配置表：老库首次启动时自动补齐，失败只告警（无 DDL 权限时仍可跑）。
 		s.ensureModelProviderSchema(context.Background())
+		// 手工配置新增重排三列（老库自动补齐）。
+		s.ensureModelSettingsSchema(context.Background())
 		// 文档中心模型：documents 以 doc_id 为主键，document_units 记录多对多关系。
 		s.ensureDocumentSchema(context.Background())
 		// 任务阶段列（上传 → 解析 → 索引）。
 		s.ensureJobSchema(context.Background())
+		// 关键词镜像表：混合检索的中文召回走 pg_trgm，与向量库实现无关。
+		s.ensureChunkTextSchema(context.Background())
+		// 运行参数表：检索/切块/记忆参数由页面配置，DB 优先于环境变量。
+		s.ensureRuntimeSettingsSchema(context.Background())
 		// 运行详情展示触发本次运行的用户问题。
 		s.ensureAgentRunSchema(context.Background())
+		// 会话记忆：摘要列与事实表，缺了会导致长对话静默丢上下文。
+		s.ensureMemorySchema(context.Background())
+		// 品牌配置：名称、副标题与 logo，页面可随时改。
+		s.ensureBrandSchema(context.Background())
 		// 持久化队列消费者：启动时重新排队被中断的任务，之后持续领取 queued 任务。
 		s.startJobWorker()
+		// 老数据的向量早已入库，关键词镜像为空时后台回填一次。
+		go s.backfillChunkText(context.Background())
+		// 内容框架：给已入库但还没有章节的文档补抽一次。
+		go s.backfillOutlines(context.Background())
 		// 图谱抽取在进程内运行，重启后把遗留的 running 标记为中断。
 		_, _ = p.Exec(context.Background(), `UPDATE kg_jobs SET status='failed', error='服务重启中断', updated_at=now() WHERE status='running'`)
 	}
@@ -111,6 +132,10 @@ func (s *Server) routes() *gin.Engine {
 	a.POST("/units", s.createUnit)
 	a.PATCH("/units/:id", s.updateUnit)
 	a.GET("/units/:id/agent-config", s.unitAgentConfig)
+	a.GET("/units/:id/outline", s.unitOutline)
+	a.GET("/units/:id/tree", s.unitTree)
+	a.POST("/units/:id/outline/extract", s.extractUnitOutline)
+	a.GET("/units/:id/examples", s.unitExamples)
 	a.GET("/units/:id/graph", s.unitGraph)
 	a.POST("/units/:id/kg/extract", s.startKGExtraction)
 	a.GET("/units/:id/kg/status", s.kgStatus)
@@ -123,6 +148,8 @@ func (s *Server) routes() *gin.Engine {
 	a.GET("/units/:id/documents/:filename/file", s.documentFile)
 	a.DELETE("/units/:id/documents/:filename", s.deleteDocument)
 	a.POST("/upload", s.upload)
+	// 上传与切块的真实限制，供前端展示，避免界面自行硬编码。
+	a.GET("/ingest/config", s.ingestConfig)
 	a.GET("/jobs", s.jobList)
 	a.GET("/jobs/:id", s.job)
 	a.POST("/jobs/:id/retry", s.retryJob)
@@ -135,9 +162,15 @@ func (s *Server) routes() *gin.Engine {
 	a.DELETE("/agent/experts/:id", s.deleteExpertDef)
 	a.GET("/agent/conversations", s.conversationList)
 	a.GET("/agent/conversations/:id", s.conversationDetail)
+	a.GET("/agent/conversations/:id/memory", s.conversationMemory)
+	a.POST("/agent/conversations/:id/memory/rebuild", s.rebuildConversationMemory)
 	a.DELETE("/agent/conversations/:id", s.deleteConversation)
 	a.POST("/agent/chat", s.chat)
 	a.POST("/agent/stream", s.agentStream)
+	// 只检索不生成：评测与调试用。
+	a.POST("/retrieve", s.retrieve)
+	// 检索留痕：最近若干次检索的分层计数，用来判断「为什么没答上来」。
+	a.GET("/retrieval/traces", s.retrievalTraces)
 	a.GET("/agent/runs/:id", s.agentRunDetail)
 	a.GET("/connectors", s.connectors)
 	a.GET("/settings/models", s.modelSettings)
@@ -150,7 +183,22 @@ func (s *Server) routes() *gin.Engine {
 	a.DELETE("/settings/models/providers/:id", s.deleteModelProvider)
 	a.POST("/settings/models/providers/:id/test", s.testModelProvider)
 	a.PUT("/settings/models/selection", s.saveModelSelection)
+	// 检索 / 切块 / 记忆参数：页面可改，改动写入 setting_changes 留痕。
+	a.GET("/settings/retrieval", s.retrievalSettingsView)
+	a.PUT("/settings/retrieval", s.saveRetrievalSettings)
 	a.GET("/settings/web-search", s.webSearchSettings)
+	// 品牌：名称、副标题、浏览器标题与 logo，改动即时生效。
+	a.GET("/brand", s.brandView)
+	a.PUT("/brand", s.saveBrand)
+	a.POST("/brand/logo", s.uploadBrandLogo)
+	a.GET("/brand/logo", s.serveBrandLogo)
+	// 实例配置：数据库、向量库、运行目录。
+	// 这组接口刻意不依赖数据库连接——DSN 改错时，它是唯一的自救入口。
+	a.GET("/instance/config", s.instanceConfig)
+	a.PUT("/instance/config", s.saveInstance)
+	a.POST("/instance/config/test-db", s.testInstanceDatabase)
+	a.POST("/instance/config/test-vector", s.testInstanceVector)
+	a.POST("/instance/config/rollback", s.rollbackInstance)
 	a.PUT("/settings/web-search", s.saveWebSearchSettings)
 	a.POST("/settings/web-search/test", s.testWebSearch)
 	a.POST("/units/:id/web-import", s.webImport)
@@ -160,6 +208,17 @@ func (s *Server) routes() *gin.Engine {
 			// expect: a stale backend is the usual reason for a missing route.
 			c.JSON(404, gin.H{"error": "API not found", "started_at": serverStartedAt})
 			return
+		}
+		// dist 根目录下的静态文件（favicon、apple-touch-icon、logo…）必须真实返回，
+		// 否则会落到下面的 index.html 兜底：浏览器拿到 text/html 的「图标」，
+		// 解析失败、静默不显示，排查时又看不到任何报错。
+		// 只认根级文件（不含 "/"），因此天然挡住 ../ 穿越；/assets 已单独挂载。
+		if name := strings.TrimPrefix(c.Request.URL.Path, "/"); name != "" && !strings.Contains(name, "/") {
+			target := filepath.Join("frontend", "dist", name)
+			if info, err := os.Stat(target); err == nil && !info.IsDir() {
+				c.File(target)
+				return
+			}
 		}
 		c.File(filepath.Join("frontend", "dist", "index.html"))
 	})
@@ -198,7 +257,21 @@ func (s *Server) units(c *gin.Context) {
 		(SELECT max(d.indexed_at) FROM documents d
 			JOIN document_units du3 ON du3.doc_id=d.doc_id WHERE du3.unit_id=u.unit_id) AS last_indexed_at,
 		(SELECT COALESCE(json_agg(DISTINCT d.doc_type) FILTER (WHERE d.doc_type<>''), '[]'::json)
-			FROM documents d JOIN document_units du4 ON du4.doc_id=d.doc_id WHERE du4.unit_id=u.unit_id) AS doc_types
+			FROM documents d JOIN document_units du4 ON du4.doc_id=d.doc_id WHERE du4.unit_id=u.unit_id) AS doc_types,
+		-- 列表页要回答「这个库讲了什么」，所以带上章节数与代表性章节标题；
+		-- 这些来自抽取结果，不是文件元数据。
+		(SELECT COALESCE(sum(jsonb_array_length(o.entries)),0) FROM doc_outlines o
+			JOIN document_units du5 ON du5.doc_id=o.doc_id WHERE du5.unit_id=u.unit_id) AS chapter_count,
+		(SELECT COALESCE(jsonb_agg(x.title), '[]'::jsonb) FROM (
+			SELECT e->>'title' AS title
+			FROM doc_outlines o2 JOIN document_units du6 ON du6.doc_id=o2.doc_id
+			CROSS JOIN LATERAL jsonb_array_elements(o2.entries) WITH ORDINALITY AS t(e, ord)
+			WHERE du6.unit_id=u.unit_id AND (e->>'level')::int = 1
+			ORDER BY o2.filename, ord
+			LIMIT 6) x) AS chapters,
+		(SELECT COALESCE(json_agg(t.filename), '[]'::json) FROM (
+			SELECT d.filename FROM documents d JOIN document_units du7 ON du7.doc_id=d.doc_id
+			WHERE du7.unit_id=u.unit_id ORDER BY d.indexed_at DESC LIMIT 3) t) AS doc_names
 		FROM units u ORDER BY u.name`)
 	if e != nil {
 		fail(c, e)
@@ -209,21 +282,26 @@ func (s *Server) units(c *gin.Context) {
 	for rows.Next() {
 		var id, n, t, i, expert string
 		var skillRaw, toolRaw, tagRaw []byte
-		var docCount, chunkCount int
+		var docCount, chunkCount, chapterCount int
 		var lastIndexed *time.Time
-		var docTypesRaw []byte
+		var docTypesRaw, chaptersRaw, docNamesRaw []byte
 		if e = rows.Scan(&id, &n, &t, &i, &expert, &skillRaw, &toolRaw, &tagRaw,
-			&docCount, &chunkCount, &lastIndexed, &docTypesRaw); e != nil {
+			&docCount, &chunkCount, &lastIndexed, &docTypesRaw,
+			&chapterCount, &chaptersRaw, &docNamesRaw); e != nil {
 			fail(c, e)
 			return
 		}
 		docTypes := []string{}
 		_ = json.Unmarshal(docTypesRaw, &docTypes)
+		chapters := []string{}
+		_ = json.Unmarshal(chaptersRaw, &chapters)
+		docNames := []string{}
+		_ = json.Unmarshal(docNamesRaw, &docNames)
 		out = append(out, gin.H{
 			"unit_id": id, "name": n, "unit_type": t, "industry": i, "expert_id": expert,
 			"skill_ids": decodeSkillIDs(skillRaw), "tool_names": decodeSkillIDs(toolRaw), "tags": decodeSkillIDs(tagRaw),
 			"document_count": docCount, "chunk_count": chunkCount, "last_indexed_at": lastIndexed,
-			"doc_types": docTypes,
+			"doc_types": docTypes, "chapter_count": chapterCount, "chapters": chapters, "doc_names": docNames,
 		})
 	}
 	if e = rows.Err(); e != nil {
@@ -354,6 +432,13 @@ func fail(c *gin.Context, e error) {
 	logging.App().Error("request_failed", append(attrs, "status", 500)...)
 	if errors.Is(e, errEmbeddingConfig) || errors.Is(e, errChatConfig) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": e.Error()})
+		return
+	}
+	// 向量空间不匹配是运维问题，不是程序缺陷：必须把「跑哪条命令修」告诉
+	// 调用方，否则只会看到一句 internal server error，无从下手。
+	var mismatch *rag.IdentityMismatch
+	if errors.As(e, &mismatch) {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": mismatch.Error()})
 		return
 	}
 	// Keep database and dependency details in the log; do not leak them to the

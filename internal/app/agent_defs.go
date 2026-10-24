@@ -26,37 +26,23 @@ var (
 	validAgentDefID   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`)
 )
 
-// allowedAgentTools is the closed set of read-only tools the built-in runtime
-// can execute. Uploaded definitions may only select from this list.
-var agentToolOrder = []string{"get_unit_profile", "query_hazards", "audit_history", "vector_search"}
-
-var allowedAgentTools = map[string]bool{
-	"get_unit_profile": true,
-	"query_hazards":    true,
-	"audit_history":    true,
-	"vector_search":    true,
-}
-
-func allAgentToolNames() []string {
-	out := make([]string, len(agentToolOrder))
-	copy(out, agentToolOrder)
-	return out
-}
+// 工具清单的唯一来源是 agent_tools.go 里的 builtinTools 声明。
+// 这里只负责「按声明顺序规范化 + 校验合法性」，不再维护第二份白名单：
+// 两份清单迟早会不同步，而症状是「配置了工具却不生效」，极难排查。
+func allAgentToolNames() []string { return builtinToolNames() }
 
 func normalizeAgentTools(values []string) []string {
-	seen := map[string]bool{}
-	out := make([]string, 0, len(values))
+	allowed := builtinToolSet()
+	seen := make(map[string]bool, len(values))
 	for _, name := range values {
 		name = strings.TrimSpace(name)
-		if !allowedAgentTools[name] || seen[name] {
-			continue
+		if allowed[name] {
+			seen[name] = true
 		}
-		seen[name] = true
-		out = append(out, name)
 	}
-	// Preserve the canonical order so prompts and UI hints stay stable.
-	ordered := make([]string, 0, len(out))
-	for _, name := range agentToolOrder {
+	// 按声明顺序输出，保证提示词与界面的工具清单稳定。
+	ordered := make([]string, 0, len(seen))
+	for _, name := range builtinToolNames() {
 		if seen[name] {
 			ordered = append(ordered, name)
 		}
@@ -153,6 +139,7 @@ func (s *Server) loadSkillDefs() ([]skill, error) {
 // When neither side declares anything the full set is kept so older
 // environment configs keep working.
 func (s *Server) projectTools(expertID string, skillIDs []string) []string {
+	allowed := builtinToolSet()
 	wanted := map[string]bool{}
 	for _, id := range skillIDs {
 		wanted[strings.TrimSpace(id)] = true
@@ -163,7 +150,7 @@ func (s *Server) projectTools(expertID string, skillIDs []string) []string {
 			continue
 		}
 		for _, name := range item.Tools {
-			if allowedAgentTools[name] {
+			if allowed[name] {
 				skillTools[name] = true
 			}
 		}
@@ -174,7 +161,7 @@ func (s *Server) projectTools(expertID string, skillIDs []string) []string {
 			continue
 		}
 		for _, name := range item.Tools {
-			if allowedAgentTools[name] {
+			if allowed[name] {
 				expertTools[name] = true
 			}
 		}
@@ -210,21 +197,10 @@ func (s *Server) projectTools(expertID string, skillIDs []string) []string {
 		return allAgentToolNames()
 	}
 	out := make([]string, 0, len(seen))
-	for _, name := range agentToolOrder {
+	for _, name := range builtinToolNames() {
 		if seen[name] {
 			out = append(out, name)
 		}
-	}
-	return out
-}
-
-func toolSet(names []string) map[string]bool {
-	if len(names) == 0 {
-		return nil
-	}
-	out := make(map[string]bool, len(names))
-	for _, name := range names {
-		out[name] = true
 	}
 	return out
 }

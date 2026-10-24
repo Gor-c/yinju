@@ -35,6 +35,10 @@ type modelConfig struct {
 	LLMBaseURL   string
 	LLMAPIKey    string
 	LLMModel     string
+	// 重排（cross-encoder）与向量/对话并列，可与它们共用同一个来源。
+	RerankBaseURL string
+	RerankAPIKey  string
+	RerankModel   string
 }
 
 func envModelConfig() modelConfig {
@@ -45,6 +49,10 @@ func envModelConfig() modelConfig {
 		LLMBaseURL:   env("LLM_BASE_URL", ""),
 		LLMAPIKey:    env("LLM_API_KEY", ""),
 		LLMModel:     env("LLM_MODEL", ""),
+		// 重排未单独配置时沿用对话模型的端点与密钥，只覆盖模型名。
+		RerankBaseURL: env("RERANK_BASE_URL", ""),
+		RerankAPIKey:  env("RERANK_API_KEY", ""),
+		RerankModel:   env("RERANK_MODEL", ""),
 	}
 }
 
@@ -60,12 +68,15 @@ func mergeModelConfig(stored, fallback modelConfig) modelConfig {
 		return ""
 	}
 	return modelConfig{
-		EmbedBaseURL: normalizeBaseURL(pick(stored.EmbedBaseURL, fallback.EmbedBaseURL)),
-		EmbedAPIKey:  pick(stored.EmbedAPIKey, fallback.EmbedAPIKey),
-		EmbedModel:   pick(stored.EmbedModel, fallback.EmbedModel, defaultEmbedModel),
-		LLMBaseURL:   normalizeBaseURL(pick(stored.LLMBaseURL, fallback.LLMBaseURL)),
-		LLMAPIKey:    pick(stored.LLMAPIKey, fallback.LLMAPIKey),
-		LLMModel:     pick(stored.LLMModel, fallback.LLMModel, defaultLLMModel),
+		EmbedBaseURL:  normalizeBaseURL(pick(stored.EmbedBaseURL, fallback.EmbedBaseURL)),
+		EmbedAPIKey:   pick(stored.EmbedAPIKey, fallback.EmbedAPIKey),
+		EmbedModel:    pick(stored.EmbedModel, fallback.EmbedModel, defaultEmbedModel),
+		LLMBaseURL:    normalizeBaseURL(pick(stored.LLMBaseURL, fallback.LLMBaseURL)),
+		LLMAPIKey:     pick(stored.LLMAPIKey, fallback.LLMAPIKey),
+		LLMModel:      pick(stored.LLMModel, fallback.LLMModel, defaultLLMModel),
+		RerankBaseURL: normalizeBaseURL(pick(stored.RerankBaseURL, fallback.RerankBaseURL)),
+		RerankAPIKey:  pick(stored.RerankAPIKey, fallback.RerankAPIKey),
+		RerankModel:   pick(stored.RerankModel, fallback.RerankModel, defaultRerankModel),
 	}
 }
 
@@ -83,12 +94,14 @@ func (s *Server) modelConfigFor(ctx context.Context) modelConfig {
 	cfg := mergeModelConfig(stored, envModelConfig())
 	if err != nil {
 		// 读取失败时不缓存：否则一次瞬时数据库错误会把「未配置」永久留在缓存里。
-		return cfg
+		return fillRerankFallback(cfg)
 	}
 	// 选中的模型来源优先于手工配置：一个来源可同时提供对话与向量，
 	// 也可拆成两个来源分别承接，未配置的字段仍沿用下面的回落链。
 	chosen, selErr := s.loadChosenProviders(ctx)
 	cfg = applySelection(cfg, chosen)
+	// 重排未单独配置时跟随最终生效的对话来源（可能是来源覆盖后的值）。
+	cfg = fillRerankFallback(cfg)
 	if selErr != nil {
 		logging.App().Warn("model_selection_read_failed", "error", selErr)
 		return cfg
@@ -98,6 +111,21 @@ func (s *Server) modelConfigFor(ctx context.Context) modelConfig {
 	s.models = &cfg
 	s.modelsAt = time.Now()
 	s.modelsMu.Unlock()
+	return cfg
+}
+
+// fillRerankFallback 在来源合并完成后补齐重排配置：
+// 未单独指定时沿用对话模型的端点与密钥，避免指向被来源覆盖前的手工值。
+func fillRerankFallback(cfg modelConfig) modelConfig {
+	if cfg.RerankBaseURL == "" {
+		cfg.RerankBaseURL = cfg.LLMBaseURL
+	}
+	if cfg.RerankAPIKey == "" {
+		cfg.RerankAPIKey = cfg.LLMAPIKey
+	}
+	if cfg.RerankModel == "" {
+		cfg.RerankModel = defaultRerankModel
+	}
 	return cfg
 }
 
@@ -122,9 +150,11 @@ func (s *Server) loadStoredModelConfig(ctx context.Context) (modelConfig, error)
 		return modelConfig{}, nil
 	}
 	var cfg modelConfig
-	err := s.db.QueryRow(ctx, `SELECT embed_base_url,embed_api_key,embed_model,llm_base_url,llm_api_key,llm_model
+	err := s.db.QueryRow(ctx, `SELECT embed_base_url,embed_api_key,embed_model,llm_base_url,llm_api_key,llm_model,
+		rerank_base_url,rerank_api_key,rerank_model
 		FROM model_settings WHERE id=1`).
-		Scan(&cfg.EmbedBaseURL, &cfg.EmbedAPIKey, &cfg.EmbedModel, &cfg.LLMBaseURL, &cfg.LLMAPIKey, &cfg.LLMModel)
+		Scan(&cfg.EmbedBaseURL, &cfg.EmbedAPIKey, &cfg.EmbedModel, &cfg.LLMBaseURL, &cfg.LLMAPIKey, &cfg.LLMModel,
+			&cfg.RerankBaseURL, &cfg.RerankAPIKey, &cfg.RerankModel)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return modelConfig{}, nil
@@ -140,25 +170,32 @@ func (s *Server) saveModelConfig(ctx context.Context, cfg modelConfig) error {
 		return errDatabaseNotConfigured
 	}
 	_, err := s.db.Exec(ctx, `INSERT INTO model_settings
-		(id,embed_base_url,embed_api_key,embed_model,llm_base_url,llm_api_key,llm_model,updated_at)
-		VALUES (1,$1,$2,$3,$4,$5,$6,now())
+		(id,embed_base_url,embed_api_key,embed_model,llm_base_url,llm_api_key,llm_model,
+		 rerank_base_url,rerank_api_key,rerank_model,updated_at)
+		VALUES (1,$1,$2,$3,$4,$5,$6,$7,$8,$9,now())
 		ON CONFLICT (id) DO UPDATE SET
 			embed_base_url=EXCLUDED.embed_base_url, embed_api_key=EXCLUDED.embed_api_key,
 			embed_model=EXCLUDED.embed_model, llm_base_url=EXCLUDED.llm_base_url,
-			llm_api_key=EXCLUDED.llm_api_key, llm_model=EXCLUDED.llm_model, updated_at=now()`,
-		cfg.EmbedBaseURL, cfg.EmbedAPIKey, cfg.EmbedModel, cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.LLMModel)
+			llm_api_key=EXCLUDED.llm_api_key, llm_model=EXCLUDED.llm_model,
+			rerank_base_url=EXCLUDED.rerank_base_url, rerank_api_key=EXCLUDED.rerank_api_key,
+			rerank_model=EXCLUDED.rerank_model, updated_at=now()`,
+		cfg.EmbedBaseURL, cfg.EmbedAPIKey, cfg.EmbedModel, cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.LLMModel,
+		cfg.RerankBaseURL, cfg.RerankAPIKey, cfg.RerankModel)
 	return err
 }
 
 // modelSettingsInput 是保存请求体。api_key 使用指针区分三种语义：
 // 字段缺失（nil）保留原值，空字符串表示清除，非空表示覆盖。
 type modelSettingsInput struct {
-	EmbedBaseURL *string `json:"embed_base_url"`
-	EmbedAPIKey  *string `json:"embed_api_key"`
-	EmbedModel   *string `json:"embed_model"`
-	LLMBaseURL   *string `json:"llm_base_url"`
-	LLMAPIKey    *string `json:"llm_api_key"`
-	LLMModel     *string `json:"llm_model"`
+	EmbedBaseURL  *string `json:"embed_base_url"`
+	EmbedAPIKey   *string `json:"embed_api_key"`
+	EmbedModel    *string `json:"embed_model"`
+	LLMBaseURL    *string `json:"llm_base_url"`
+	LLMAPIKey     *string `json:"llm_api_key"`
+	LLMModel      *string `json:"llm_model"`
+	RerankBaseURL *string `json:"rerank_base_url"`
+	RerankAPIKey  *string `json:"rerank_api_key"`
+	RerankModel   *string `json:"rerank_model"`
 }
 
 func (s *Server) modelSettings(c *gin.Context) {
@@ -178,20 +215,24 @@ func (s *Server) modelSettings(c *gin.Context) {
 	}
 	llmActive, _ := selectionFor(chosen, modelRoleLLM)
 	embedActive, _ := selectionFor(chosen, modelRoleEmbed)
+	rerankActive, _ := selectionFor(chosen, modelRoleRerank)
 
 	items := make([]gin.H, 0, len(providers))
 	for _, p := range providers {
-		items = append(items, providerJSON(p, p.ID == llmActive.ID, p.ID == embedActive.ID))
+		items = append(items, providerJSON(p, p.ID == llmActive.ID, p.ID == embedActive.ID, p.ID == rerankActive.ID))
 	}
 
 	// 生效值仍以 embed/llm 两段返回，前端无需区分「来自来源」还是「手工配置」。
 	// 来源生效时 base_url_from 记为 provider，并带上来源名便于展示。
-	embedSource, llmSource := "unset", "unset"
+	embedSource, llmSource, rerankSource := "unset", "unset", "unset"
 	if embedActive.ID > 0 {
 		embedSource = "provider"
 	}
 	if llmActive.ID > 0 {
 		llmSource = "provider"
+	}
+	if rerankActive.ID > 0 {
+		rerankSource = "provider"
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"embed": gin.H{
@@ -216,16 +257,33 @@ func (s *Server) modelSettings(c *gin.Context) {
 			"provider_id":   llmActive.ID,
 			"provider_name": llmActive.Name,
 		},
+		"rerank": gin.H{
+			"base_url":      cfg.RerankBaseURL,
+			"model":         cfg.RerankModel,
+			"api_key_set":   cfg.RerankAPIKey != "",
+			"api_key_hint":  maskKey(cfg.RerankAPIKey),
+			"base_url_from": orSource(rerankSource, configSource(stored.RerankBaseURL, envCfg.RerankBaseURL)),
+			"api_key_from":  orSource(rerankSource, configSource(stored.RerankAPIKey, envCfg.RerankAPIKey)),
+			"model_from":    orSource(rerankSource, configSource(stored.RerankModel, envCfg.RerankModel)),
+			"provider_id":   rerankActive.ID,
+			"provider_name": rerankActive.Name,
+			"enabled":       !strings.EqualFold(strings.TrimSpace(env("RERANK_ENABLED", "true")), "false"),
+			"min_score":     envFloat("RERANK_MIN_SCORE", 0.1),
+		},
 		"providers": items,
-		"selection": gin.H{"llm": llmActive.ID, "embed": embedActive.ID},
+		"selection": gin.H{"llm": llmActive.ID, "embed": embedActive.ID, "rerank": rerankActive.ID},
 		// manual 返回手工配置原值：来源生效时 embed/llm 展示的是合并后的生效值，
 		// 前端编辑手工配置必须拿到未被来源覆盖的原始值，否则保存会把来源值写入库。
 		"manual": gin.H{
-			"embed": gin.H{"base_url": stored.EmbedBaseURL, "model": stored.EmbedModel},
-			"llm":   gin.H{"base_url": stored.LLMBaseURL, "model": stored.LLMModel},
+			"embed":  gin.H{"base_url": stored.EmbedBaseURL, "model": stored.EmbedModel},
+			"llm":    gin.H{"base_url": stored.LLMBaseURL, "model": stored.LLMModel},
+			"rerank": gin.H{"base_url": stored.RerankBaseURL, "model": stored.RerankModel},
 		},
-		"embedding_dimensions": embeddingDimensions,
-		"updated_at":           s.modelSettingsUpdatedAt(c),
+		"embedding_dimensions": embeddingDimensions(),
+		// 当前生效的向量空间身份（模型@维度）。与已索引文档的身份不一致时，
+		// 检索会直接报错；把这个值暴露出来，运维才能一眼看出是不是换了模型。
+		"embedding_identity": s.embeddingIdentityDescription(c),
+		"updated_at":         s.modelSettingsUpdatedAt(c),
 	})
 }
 
@@ -266,6 +324,15 @@ func (s *Server) saveModelSettings(c *gin.Context) {
 	if in.LLMAPIKey != nil {
 		cfg.LLMAPIKey = strings.TrimSpace(*in.LLMAPIKey)
 	}
+	if in.RerankBaseURL != nil {
+		cfg.RerankBaseURL = normalizeBaseURL(*in.RerankBaseURL)
+	}
+	if in.RerankModel != nil {
+		cfg.RerankModel = strings.TrimSpace(*in.RerankModel)
+	}
+	if in.RerankAPIKey != nil {
+		cfg.RerankAPIKey = strings.TrimSpace(*in.RerankAPIKey)
+	}
 
 	if err := validateBaseURL(cfg.EmbedBaseURL); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "embedding base_url 无效：" + err.Error()})
@@ -273,6 +340,10 @@ func (s *Server) saveModelSettings(c *gin.Context) {
 	}
 	if err := validateBaseURL(cfg.LLMBaseURL); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "chat base_url 无效：" + err.Error()})
+		return
+	}
+	if err := validateBaseURL(cfg.RerankBaseURL); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "rerank base_url 无效：" + err.Error()})
 		return
 	}
 
@@ -416,8 +487,8 @@ func (s *Server) testModelSettings(c *gin.Context) {
 	var in modelTestInput
 	_ = c.ShouldBindJSON(&in)
 	kind := strings.ToLower(strings.TrimSpace(in.Kind))
-	if kind != "" && kind != "embed" && kind != "llm" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "kind 必须是 embed 或 llm"})
+	if kind != "" && kind != modelRoleEmbed && kind != modelRoleLLM && kind != modelRoleRerank {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "kind 必须是 embed、llm 或 rerank"})
 		return
 	}
 
@@ -441,12 +512,21 @@ func (s *Server) runModelTest(ctx context.Context, cfg modelConfig, kind string)
 			embedResult["error"] = embedErr.Error()
 		} else if len(vecs) > 0 {
 			embedResult["dimensions"] = len(vecs[0])
-			if len(vecs[0]) != embeddingDimensions {
+			if len(vecs[0]) != embeddingDimensions() {
 				embedResult["ok"] = false
-				embedResult["error"] = fmt.Sprintf("返回 %d 维，期望 %d 维；直接入库会导致索引不一致", len(vecs[0]), embeddingDimensions)
+				embedResult["error"] = fmt.Sprintf("返回 %d 维，期望 %d 维；直接入库会导致索引不一致", len(vecs[0]), embeddingDimensions())
 			}
 		}
 		out["embedding"] = embedResult
+	}
+	if kind == "" || kind == modelRoleRerank {
+		rerankStart := time.Now()
+		rerankErr := s.testRerankWith(ctx, cfg)
+		rerankResult := gin.H{"ok": rerankErr == nil, "latency_ms": time.Since(rerankStart).Milliseconds()}
+		if rerankErr != nil {
+			rerankResult["error"] = rerankErr.Error()
+		}
+		out["rerank"] = rerankResult
 	}
 	if testChat {
 		chatStart := time.Now()
@@ -521,4 +601,22 @@ func maskKey(key string) string {
 		return "••••"
 	}
 	return "••••" + key[len(key)-4:]
+}
+
+// ensureModelSettingsSchema 给老库补上重排三列（可重复执行）。
+func (s *Server) ensureModelSettingsSchema(ctx context.Context) {
+	if s.db == nil {
+		return
+	}
+	stmts := []string{
+		`ALTER TABLE model_settings ADD COLUMN IF NOT EXISTS rerank_base_url text NOT NULL DEFAULT ''`,
+		`ALTER TABLE model_settings ADD COLUMN IF NOT EXISTS rerank_api_key text NOT NULL DEFAULT ''`,
+		`ALTER TABLE model_settings ADD COLUMN IF NOT EXISTS rerank_model text NOT NULL DEFAULT ''`,
+	}
+	for _, stmt := range stmts {
+		if _, err := s.db.Exec(ctx, stmt); err != nil {
+			logging.App().Warn("model_settings_migration_failed", "error", err)
+			return
+		}
+	}
 }

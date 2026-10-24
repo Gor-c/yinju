@@ -412,18 +412,11 @@ func (s *Server) searchChunks(ctx context.Context, unitID, query string, k int) 
 	if s.vectors == nil {
 		return nil, fmt.Errorf("vector store is not configured")
 	}
-	vectors, err := s.embedContext(ctx, []string{query})
-	if err != nil {
-		return nil, err
-	}
-	if len(vectors) == 0 {
-		return nil, fmt.Errorf("embedding API returned no vectors")
-	}
 	docIDs, err := s.docIDsForUnits(ctx, []string{unitID})
 	if err != nil {
 		return nil, err
 	}
-	return s.vectors.Search(ctx, docIDs, vectors[0], k)
+	return s.hybridSearch(ctx, docIDs, query, k)
 }
 
 func (s *Server) vectorSearch(ctx context.Context, unitID, query string, k int) ([]gin.H, error) {
@@ -433,7 +426,8 @@ func (s *Server) vectorSearch(ctx context.Context, unitID, query string, k int) 
 	}
 	result := make([]gin.H, 0, len(matches))
 	for _, match := range matches {
-		result = append(result, gin.H{"filename": match.Filename, "doc_type": match.DocType, "content": match.Content, "distance": match.Distance})
+		result = append(result, gin.H{"doc_id": match.DocID, "filename": match.Filename, "doc_type": match.DocType,
+			"chunk_index": match.ChunkIndex, "content": match.Content, "distance": match.Distance, "score": match.Score})
 	}
 	return result, nil
 }

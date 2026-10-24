@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"knowledge-base/internal/rag"
 )
 
 func TestSplit(t *testing.T) {
@@ -27,7 +29,11 @@ func TestSplit(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := split(tc.text, tc.size, tc.overlap)
+			parsed := rag.FixedChunker{Size: tc.size, Overlap: tc.overlap}.Chunk(tc.text)
+			got := make([]string, len(parsed))
+			for i, chunk := range parsed {
+				got[i] = chunk.Content
+			}
 			if len(got) != len(tc.want) {
 				t.Fatalf("split() = %#v, want %#v", got, tc.want)
 			}
@@ -42,16 +48,18 @@ func TestSplit(t *testing.T) {
 
 func TestSplitCoversEveryRune(t *testing.T) {
 	text := strings.Repeat("知识库文档", 400)
-	chunks := split(text, chunkSize, chunkOverlap)
-	if len(chunks) == 0 {
+	parsed := rag.FixedChunker{Size: defaultChunkSize, Overlap: defaultChunkOverlap}.Chunk(text)
+	if len(parsed) == 0 {
 		t.Fatal("expected chunks")
 	}
-	if len(chunks) < 2 {
-		t.Fatalf("expected multiple chunks, got %d", len(chunks))
+	if len(parsed) < 2 {
+		t.Fatalf("expected multiple chunks, got %d", len(parsed))
 	}
-	for i, chunk := range chunks {
-		if n := len([]rune(chunk)); n > chunkSize {
-			t.Fatalf("chunk %d has %d runes, limit is %d", i, n, chunkSize)
+	chunks := make([]string, len(parsed))
+	for i, chunk := range parsed {
+		chunks[i] = chunk.Content
+		if n := len([]rune(chunk.Content)); n > defaultChunkSize {
+			t.Fatalf("chunk %d has %d runes, limit is %d", i, n, defaultChunkSize)
 		}
 	}
 	runes := []rune(text)

@@ -54,16 +54,21 @@ type skill struct {
 type citation struct {
 	// SourceType distinguishes knowledge-base documents from external web pages
 	// so the UI and the model never mix them up.
-	SourceType string  `json:"source_type,omitempty"`
-	UnitID     string  `json:"unit_id,omitempty"`
-	UnitName   string  `json:"unit_name,omitempty"`
-	Filename   string  `json:"filename,omitempty"`
-	DocType    string  `json:"doc_type,omitempty"`
+	SourceType string `json:"source_type,omitempty"`
+	UnitID     string `json:"unit_id,omitempty"`
+	UnitName   string `json:"unit_name,omitempty"`
+	Filename   string `json:"filename,omitempty"`
+	DocType    string `json:"doc_type,omitempty"`
+	// DocID / ChunkIndex 用于前端把引用定位到原文的具体片段。
+	DocID      string  `json:"doc_id,omitempty"`
+	ChunkIndex int     `json:"chunk_index"`
 	Title      string  `json:"title,omitempty"`
 	URL        string  `json:"url,omitempty"`
 	Site       string  `json:"site,omitempty"`
 	Content    string  `json:"content"`
 	Distance   float64 `json:"distance,omitempty"`
+	// Score 是重排分（rerank）或融合分，前端只在 hover 时展示。
+	Score float64 `json:"score,omitempty"`
 }
 
 const (
@@ -110,15 +115,6 @@ func (s *Server) ask(c *gin.Context) {
 		c.JSON(404, gin.H{"error": "unit not found: " + in.UnitID})
 		return
 	}
-	qv, e := s.embedContext(c, []string{in.Question})
-	if e != nil {
-		fail(c, e)
-		return
-	}
-	if len(qv) == 0 {
-		c.JSON(502, gin.H{"error": "embedding API returned no vectors"})
-		return
-	}
 	k := in.TopK
 	if k < 1 || k > 20 {
 		k = 5
@@ -128,7 +124,7 @@ func (s *Server) ask(c *gin.Context) {
 		fail(c, e)
 		return
 	}
-	matches, e := s.vectors.Search(c, docIDs, qv[0], k)
+	matches, e := s.hybridSearch(c, docIDs, in.Question, k)
 	if e != nil {
 		fail(c, e)
 		return
@@ -136,8 +132,20 @@ func (s *Server) ask(c *gin.Context) {
 	citations := []citation{}
 	var contextParts []string
 	for _, match := range matches {
-		citations = append(citations, citation{Filename: match.Filename, DocType: match.DocType, Content: match.Content, Distance: match.Distance})
+		citations = append(citations, citation{
+			SourceType: "document", UnitID: in.UnitID, Filename: match.Filename, DocType: match.DocType,
+			DocID: match.DocID, ChunkIndex: match.ChunkIndex, Content: match.Content,
+			Distance: match.Distance, Score: match.Score,
+		})
 		contextParts = append(contextParts, "["+match.Filename+"] "+match.Content)
+	}
+	// 严格模式：没有达到阈值的依据时直接说明未找到，不让模型自由发挥。
+	if len(matches) == 0 {
+		logging.App().Info("rag_ask_no_evidence",
+			"request_id", c.GetString(requestIDKey), "unit_id", in.UnitID,
+			"duration_ms", time.Since(started).Milliseconds())
+		c.JSON(200, gin.H{"answer": noEvidenceAnswer, "citations": []citation{}, "no_evidence": true})
+		return
 	}
 	answer, e := s.complete(c, "你是知识库分析专家。请仅根据给定资料回答；资料不足时明确说明。", "问题："+in.Question+"\n\n检索资料：\n"+strings.Join(contextParts, "\n\n"))
 	if e != nil {
@@ -152,6 +160,67 @@ func (s *Server) ask(c *gin.Context) {
 		"duration_ms", time.Since(started).Milliseconds(),
 	)
 	c.JSON(200, gin.H{"answer": answer, "citations": citations})
+}
+
+// retrieve 只做检索、不调用大模型，用于评测、调试与「检索预览」。
+// 与 Agent 工具走同一条混合检索链路，因此评测结果能代表真实问答的召回。
+func (s *Server) retrieve(c *gin.Context) {
+	var in struct {
+		UnitID  string   `json:"unit_id"`
+		UnitIDs []string `json:"unit_ids"`
+		Query   string   `json:"query"`
+		TopK    int      `json:"top_k"`
+	}
+	if err := c.ShouldBindJSON(&in); err != nil || strings.TrimSpace(in.Query) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "query is required"})
+		return
+	}
+	units := in.UnitIDs
+	if len(units) == 0 && in.UnitID != "" {
+		units = []string{in.UnitID}
+	}
+	if len(units) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "unit_id or unit_ids is required"})
+		return
+	}
+	if !s.ready(c) {
+		return
+	}
+	k := in.TopK
+	if k < 1 || k > 20 {
+		k = 5
+	}
+	docIDs, err := s.docIDsForUnits(c, units)
+	if err != nil {
+		fail(c, err)
+		return
+	}
+	started := time.Now()
+	matches, stats, err := s.hybridSearchWithStats(c, docIDs, in.Query, k)
+	if err != nil {
+		fail(c, err)
+		return
+	}
+	items := make([]gin.H, 0, len(matches))
+	for _, m := range matches {
+		items = append(items, gin.H{
+			"doc_id": m.DocID, "filename": m.Filename, "doc_type": m.DocType,
+			"chunk_index": m.ChunkIndex, "content": m.Content,
+			"distance": m.Distance, "score": m.Score,
+		})
+	}
+	// 分层计数随结果一起返回：改阈值之后，光看「命中几条」不足以判断
+	// 改对了没有，得知道它卡在哪一层。
+	c.JSON(http.StatusOK, gin.H{
+		"query": in.Query, "unit_ids": units, "top_k": k,
+		"count": len(items), "matches": items, "no_evidence": len(items) == 0,
+		"stats": gin.H{
+			"vector_hits": stats.VectorHits, "keyword_hits": stats.KeywordHits,
+			"fused": stats.Fused, "reranked": stats.Reranked, "kept": len(items),
+			"degraded": stats.Degraded, "doc_count": len(docIDs),
+		},
+		"duration_ms": time.Since(started).Milliseconds(),
+	})
 }
 
 func (s *Server) agentConfig(c *gin.Context) {

@@ -84,12 +84,25 @@ func main() {
 		return
 	}
 
+	// 先清 documents 的索引声明，再清向量库。
+	// 顺序不能反：如果向量库先清空而 documents 仍写着 chunk_count>0，
+	// 重新排队的任务会走「复用已有索引」分支直接跳过向量化，
+	// 得到一个 documents 说完成、实际检索不到任何内容的索引。
+	if _, err := pool.Exec(ctx, `UPDATE documents
+		SET chunk_count=0, embedding_model='', embedding_dim=0, chunker=''`); err != nil {
+		log.Fatalf("clear document index state: %v", err)
+	}
+
 	store, err := vectorstore.New(os.Getenv("VECTOR_STORE"), pool)
 	if err != nil {
 		log.Fatalf("init vector store: %v", err)
 	}
 	if err := store.Reset(ctx); err != nil {
 		log.Fatalf("reset vector store: %v", err)
+	}
+	// 关键词镜像与向量同源，重建时一起清空，避免残留片段被关键词检索命中。
+	if _, err := pool.Exec(ctx, `DELETE FROM chunk_text`); err != nil {
+		log.Printf("清空关键词索引失败（服务启动后会重新回填）: %v", err)
 	}
 	fmt.Println("向量库已清空，正在重新排队…")
 

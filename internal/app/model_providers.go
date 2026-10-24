@@ -19,19 +19,21 @@ import (
 // 当前选择记录在 model_selection；未选择时回落到 model_settings 手工配置，
 // 再回落到 EMBED_* / LLM_* 环境变量，保证旧部署行为不变。
 type modelProvider struct {
-	ID         int64
-	Name       string
-	BaseURL    string
-	APIKey     string
-	LLMModel   string
-	EmbedModel string
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
+	ID          int64
+	Name        string
+	BaseURL     string
+	APIKey      string
+	LLMModel    string
+	EmbedModel  string
+	RerankModel string
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
 }
 
 const (
-	modelRoleLLM   = "llm"
-	modelRoleEmbed = "embed"
+	modelRoleLLM    = "llm"
+	modelRoleEmbed  = "embed"
+	modelRoleRerank = "rerank"
 )
 
 // chosenProvider 表示某个角色当前选中的来源。
@@ -47,6 +49,7 @@ const createModelProvidersTable = `CREATE TABLE IF NOT EXISTS model_providers (
 	api_key text NOT NULL DEFAULT '',
 	llm_model text NOT NULL DEFAULT '',
 	embed_model text NOT NULL DEFAULT '',
+	rerank_model text NOT NULL DEFAULT '',
 	created_at timestamptz NOT NULL DEFAULT now(),
 	updated_at timestamptz NOT NULL DEFAULT now()
 )`
@@ -56,7 +59,7 @@ const createModelSelectionTable = `CREATE TABLE IF NOT EXISTS model_selection (
 	role text PRIMARY KEY,
 	provider_id bigint NOT NULL DEFAULT 0,
 	updated_at timestamptz NOT NULL DEFAULT now(),
-	CONSTRAINT model_selection_role_check CHECK (role IN ('llm','embed'))
+	CONSTRAINT model_selection_role_check CHECK (role IN ('llm','embed','rerank'))
 )`
 
 // ensureModelProviderSchema 让老库无需手工迁移即可使用多来源配置。
@@ -71,15 +74,27 @@ func (s *Server) ensureModelProviderSchema(ctx context.Context) {
 			return
 		}
 	}
+	// 老库补 rerank_model 列，并把角色约束放宽到 rerank。
+	migrations := []string{
+		`ALTER TABLE model_providers ADD COLUMN IF NOT EXISTS rerank_model text NOT NULL DEFAULT ''`,
+		`ALTER TABLE model_selection DROP CONSTRAINT IF EXISTS model_selection_role_check`,
+		`ALTER TABLE model_selection ADD CONSTRAINT model_selection_role_check CHECK (role IN ('llm','embed','rerank'))`,
+	}
+	for _, stmt := range migrations {
+		if _, err := s.db.Exec(ctx, stmt); err != nil {
+			logging.App().Warn("model_provider_migration_failed", "error", err)
+			return
+		}
+	}
 }
 
 func scanModelProvider(row pgx.Row) (modelProvider, error) {
 	var p modelProvider
-	err := row.Scan(&p.ID, &p.Name, &p.BaseURL, &p.APIKey, &p.LLMModel, &p.EmbedModel, &p.CreatedAt, &p.UpdatedAt)
+	err := row.Scan(&p.ID, &p.Name, &p.BaseURL, &p.APIKey, &p.LLMModel, &p.EmbedModel, &p.RerankModel, &p.CreatedAt, &p.UpdatedAt)
 	return p, err
 }
 
-const modelProviderColumns = `id,name,base_url,api_key,llm_model,embed_model,created_at,updated_at`
+const modelProviderColumns = `id,name,base_url,api_key,llm_model,embed_model,rerank_model,created_at,updated_at`
 
 func (s *Server) listModelProviders(ctx context.Context) ([]modelProvider, error) {
 	if s.db == nil {
@@ -114,7 +129,7 @@ func (s *Server) loadChosenProviders(ctx context.Context) ([]chosenProvider, err
 	if s.db == nil {
 		return nil, nil
 	}
-	rows, err := s.db.Query(ctx, `SELECT ms.role, p.id, p.name, p.base_url, p.api_key, p.llm_model, p.embed_model, p.created_at, p.updated_at
+	rows, err := s.db.Query(ctx, `SELECT ms.role, p.id, p.name, p.base_url, p.api_key, p.llm_model, p.embed_model, p.rerank_model, p.created_at, p.updated_at
 		FROM model_selection ms
 		JOIN model_providers p ON p.id = ms.provider_id
 		WHERE ms.provider_id > 0`)
@@ -127,7 +142,7 @@ func (s *Server) loadChosenProviders(ctx context.Context) ([]chosenProvider, err
 	for rows.Next() {
 		var item chosenProvider
 		if err := rows.Scan(&item.Role, &item.Provider.ID, &item.Provider.Name, &item.Provider.BaseURL,
-			&item.Provider.APIKey, &item.Provider.LLMModel, &item.Provider.EmbedModel,
+			&item.Provider.APIKey, &item.Provider.LLMModel, &item.Provider.EmbedModel, &item.Provider.RerankModel,
 			&item.Provider.CreatedAt, &item.Provider.UpdatedAt); err != nil {
 			return nil, err
 		}
@@ -162,6 +177,16 @@ func applySelection(cfg modelConfig, chosen []chosenProvider) modelConfig {
 			if p.APIKey != "" {
 				cfg.EmbedAPIKey = p.APIKey
 			}
+		case modelRoleRerank:
+			if p.BaseURL != "" {
+				cfg.RerankBaseURL = normalizeBaseURL(p.BaseURL)
+			}
+			if p.RerankModel != "" {
+				cfg.RerankModel = p.RerankModel
+			}
+			if p.APIKey != "" {
+				cfg.RerankAPIKey = p.APIKey
+			}
 		}
 	}
 	return cfg
@@ -181,28 +206,31 @@ func (s *Server) setModelSelection(ctx context.Context, role string, providerID 
 }
 
 // providerJSON 输出给前端：api_key 只回显掩码，从不返回明文。
-func providerJSON(p modelProvider, activeLLM, activeEmbed bool) gin.H {
+func providerJSON(p modelProvider, activeLLM, activeEmbed, activeRerank bool) gin.H {
 	return gin.H{
 		"id":             p.ID,
 		"name":           p.Name,
 		"base_url":       p.BaseURL,
 		"llm_model":      p.LLMModel,
 		"embed_model":    p.EmbedModel,
+		"rerank_model":   p.RerankModel,
 		"api_key_set":    p.APIKey != "",
 		"api_key_hint":   maskKey(p.APIKey),
 		"active_llm":     activeLLM,
 		"active_embed":   activeEmbed,
+		"active_rerank":  activeRerank,
 		"updated_at":     p.UpdatedAt,
 		"local_endpoint": isLocalBaseURL(p.BaseURL),
 	}
 }
 
 type providerInput struct {
-	Name       *string `json:"name"`
-	BaseURL    *string `json:"base_url"`
-	APIKey     *string `json:"api_key"`
-	LLMModel   *string `json:"llm_model"`
-	EmbedModel *string `json:"embed_model"`
+	Name        *string `json:"name"`
+	BaseURL     *string `json:"base_url"`
+	APIKey      *string `json:"api_key"`
+	LLMModel    *string `json:"llm_model"`
+	EmbedModel  *string `json:"embed_model"`
+	RerankModel *string `json:"rerank_model"`
 }
 
 // applyProviderInput 逐字段覆盖；api_key 用指针区分「不修改」与「清除」。
@@ -221,6 +249,9 @@ func applyProviderInput(p *modelProvider, in providerInput) {
 	}
 	if in.EmbedModel != nil {
 		p.EmbedModel = strings.TrimSpace(*in.EmbedModel)
+	}
+	if in.RerankModel != nil {
+		p.RerankModel = strings.TrimSpace(*in.RerankModel)
 	}
 }
 
@@ -246,20 +277,21 @@ func (s *Server) createModelProvider(c *gin.Context) {
 	if p.Name == "" {
 		p.Name = p.BaseURL
 	}
-	if p.LLMModel == "" && p.EmbedModel == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "至少填写一个对话模型或向量模型"})
+	if p.LLMModel == "" && p.EmbedModel == "" && p.RerankModel == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "至少填写一个对话、向量或重排模型"})
 		return
 	}
 
-	err := s.db.QueryRow(c, `INSERT INTO model_providers (name,base_url,api_key,llm_model,embed_model)
-		VALUES ($1,$2,$3,$4,$5) RETURNING id`, p.Name, p.BaseURL, p.APIKey, p.LLMModel, p.EmbedModel).Scan(&p.ID)
+	err := s.db.QueryRow(c, `INSERT INTO model_providers (name,base_url,api_key,llm_model,embed_model,rerank_model)
+		VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
+		p.Name, p.BaseURL, p.APIKey, p.LLMModel, p.EmbedModel, p.RerankModel).Scan(&p.ID)
 	if err != nil {
 		fail(c, err)
 		return
 	}
 	s.invalidateModelConfig()
 	logging.App().Info("model_provider_created", "request_id", c.GetString(requestIDKey), "id", p.ID, "name", p.Name)
-	c.JSON(http.StatusOK, gin.H{"provider": providerJSON(p, false, false)})
+	c.JSON(http.StatusOK, gin.H{"provider": providerJSON(p, false, false, false)})
 }
 
 func (s *Server) updateModelProvider(c *gin.Context) {
@@ -290,23 +322,24 @@ func (s *Server) updateModelProvider(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Base URL 无效：" + err.Error()})
 		return
 	}
-	if p.LLMModel == "" && p.EmbedModel == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "至少填写一个对话模型或向量模型"})
+	if p.LLMModel == "" && p.EmbedModel == "" && p.RerankModel == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "至少填写一个对话、向量或重排模型"})
 		return
 	}
 	if strings.TrimSpace(p.Name) == "" {
 		p.Name = p.BaseURL
 	}
 
-	_, err = s.db.Exec(c, `UPDATE model_providers SET name=$2,base_url=$3,api_key=$4,llm_model=$5,embed_model=$6,updated_at=now()
-		WHERE id=$1`, p.ID, p.Name, p.BaseURL, p.APIKey, p.LLMModel, p.EmbedModel)
+	_, err = s.db.Exec(c, `UPDATE model_providers SET name=$2,base_url=$3,api_key=$4,llm_model=$5,embed_model=$6,
+		rerank_model=$7,updated_at=now() WHERE id=$1`,
+		p.ID, p.Name, p.BaseURL, p.APIKey, p.LLMModel, p.EmbedModel, p.RerankModel)
 	if err != nil {
 		fail(c, err)
 		return
 	}
 	s.invalidateModelConfig()
 	logging.App().Info("model_provider_updated", "request_id", c.GetString(requestIDKey), "id", p.ID, "name", p.Name)
-	c.JSON(http.StatusOK, gin.H{"provider": providerJSON(p, false, false)})
+	c.JSON(http.StatusOK, gin.H{"provider": providerJSON(p, false, false, false)})
 }
 
 func (s *Server) deleteModelProvider(c *gin.Context) {
@@ -352,7 +385,7 @@ func (s *Server) saveModelSelection(c *gin.Context) {
 		return
 	}
 	role := strings.ToLower(strings.TrimSpace(in.Role))
-	if role != modelRoleLLM && role != modelRoleEmbed {
+	if role != modelRoleLLM && role != modelRoleEmbed && role != modelRoleRerank {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "role 必须是 llm 或 embed"})
 		return
 	}
