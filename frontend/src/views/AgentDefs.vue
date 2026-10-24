@@ -254,7 +254,7 @@ onMounted(load)
   padding: 12px;
   border-radius: 8px;
   background: var(--code-bg, rgba(128, 128, 128, 0.1));
-  font-size: 12px;
+  font-size: calc(12px * var(--fs-scale));
   line-height: 1.6;
   overflow: auto;
 }

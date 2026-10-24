@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 48" width="200" height="48" role="img" aria-label="知识库管理 智能业务平台">
+  <title>知识库管理</title>
+  <!-- 横向组合：标记 + 中文名 + 一句话定位。
+       中文用 <text> 渲染，依赖系统字体栈；页面内使用同形状的内联 SVG，
+       文字交给页面字体，以保证跨平台字形一致。 -->
+  <g transform="translate(0,8) scale(1)">
+    <path fill="#171717" d="M1 9a8 8 0 0 1 8-8h12l10 10v12a8 8 0 0 1-8 8H9a8 8 0 0 1-8-8V9Z"/>
+    <path fill="#ffffff" fill-opacity="0.2" d="M21 1 31 11H21V1Z"/>
+    <g fill="none" stroke-linecap="round">
+      <path stroke="#ffffff" stroke-opacity="0.46" stroke-width="2.4" d="M8 12.4h15"/>
+      <path stroke="#10a37f" stroke-width="3" d="M8 18.2h16"/>
+      <path stroke="#ffffff" stroke-opacity="0.46" stroke-width="2.4" d="M8 24h6.5"/>
+    </g>
+  </g>
+
+  <text x="46" y="24" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Noto Sans SC', 'Microsoft YaHei', sans-serif"
+        font-size="15.5" font-weight="600" letter-spacing="0.5" fill="#171717">知识库管理</text>
+  <text x="46" y="38" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Noto Sans SC', 'Microsoft YaHei', sans-serif"
+        font-size="10.5" letter-spacing="1.4" fill="#8f8f96">KNOWLEDGE AGENT</text>
+</svg>

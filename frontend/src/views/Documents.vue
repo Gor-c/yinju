@@ -514,20 +514,20 @@ onMounted(async () => {
 
 .docs-panel-heading .card-title {
   margin: 0;
-  font-size: 15px;
+  font-size: calc(15px * var(--fs-scale));
 }
 
 .docs-panel-heading p {
   margin: 4px 0 0;
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: calc(11px * var(--fs-scale));
 }
 
 .docs-sort-note {
   flex: none;
   padding-top: 2px;
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: calc(11px * var(--fs-scale));
 }
 
 .docs-toolbar {
@@ -595,7 +595,7 @@ onMounted(async () => {
   border-radius: 10px;
   background: var(--bg-subtle);
   color: var(--text-secondary);
-  font-size: 9px;
+  font-size: calc(9px * var(--fs-scale));
   font-weight: 750;
   letter-spacing: 0.04em;
 }
@@ -624,7 +624,7 @@ onMounted(async () => {
   min-width: 0;
   margin: 0;
   color: var(--text);
-  font-size: 13px;
+  font-size: calc(13px * var(--fs-scale));
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -639,7 +639,7 @@ onMounted(async () => {
   flex-wrap: wrap;
   gap: 5px 13px;
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: calc(11px * var(--fs-scale));
 }
 
 .doc-card-meta span {
@@ -664,7 +664,7 @@ onMounted(async () => {
 .doc-ref-label {
   margin-right: 2px;
   color: var(--text-muted);
-  font-size: 10px;
+  font-size: calc(10px * var(--fs-scale));
 }
 
 .doc-card-refs :deep(.el-tag) {
@@ -678,7 +678,7 @@ onMounted(async () => {
 
 .doc-orphan {
   color: #b45309;
-  font-size: 11px;
+  font-size: calc(11px * var(--fs-scale));
 }
 
 .doc-card-actions {
@@ -720,14 +720,14 @@ onMounted(async () => {
 
 .docs-empty b {
   color: var(--text-secondary);
-  font-size: 14px;
+  font-size: calc(14px * var(--fs-scale));
   font-weight: 600;
 }
 
 .docs-empty p {
   margin: 0 0 6px;
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs-scale));
 }
 
 .doc-name {
@@ -735,7 +735,7 @@ onMounted(async () => {
   word-break: break-all;
 }
 .doc-id {
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--fs-scale));
   margin-top: 2px;
 }
 .ref-tags {
@@ -752,7 +752,7 @@ onMounted(async () => {
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--bg-subtle);
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs-scale));
 }
 .chunk-meta div {
   display: flex;
@@ -783,11 +783,11 @@ onMounted(async () => {
   align-items: center;
   gap: 8px;
   margin-bottom: 8px;
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs-scale));
 }
 .chunk-text {
   margin: 0;
-  font-size: 13px;
+  font-size: calc(13px * var(--fs-scale));
   line-height: 1.75;
   color: var(--text-secondary);
   white-space: pre-wrap;
@@ -805,7 +805,7 @@ onMounted(async () => {
   border: none;
   background: transparent;
   color: var(--accent);
-  font-size: 11px;
+  font-size: calc(11px * var(--fs-scale));
   cursor: pointer;
 }
 .chunk-pager {
@@ -814,7 +814,7 @@ onMounted(async () => {
   justify-content: space-between;
   gap: 10px;
   margin-top: 14px;
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs-scale));
 }
 .docs-preview-footer {
   display: flex;
@@ -825,7 +825,7 @@ onMounted(async () => {
 .docs-preview-footer > span {
   overflow: hidden;
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: calc(11px * var(--fs-scale));
   text-overflow: ellipsis;
   white-space: nowrap;
 }

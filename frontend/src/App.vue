@@ -6,10 +6,12 @@
       @click="expandSidebar"
     >
       <div class="brand">
-        <span class="brand-icon">知</span>
+        <span class="brand-icon" aria-hidden="true">
+          <BrandMark :size="32" />
+        </span>
         <div>
-          <b>知识库管理</b>
-          <small>智能业务平台</small>
+          <b>{{ brand.app_name }}</b>
+          <small>{{ brand.app_subtitle }}</small>
         </div>
         <button
           v-if="!sidebarCollapsed"
@@ -28,6 +30,7 @@
       </div>
 
       <nav class="nav">
+        <div v-if="!sidebarCollapsed" class="nav-group-label">工作区</div>
         <el-tooltip content="Agent 对话" placement="right" :disabled="!sidebarCollapsed" :show-after="120">
           <router-link to="/agent" class="nav-item" :class="{ active: activeMenu === '/agent' }">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -64,6 +67,20 @@
             <span>文档库</span>
           </router-link>
         </el-tooltip>
+
+        <!-- 扩展区单独成组：以后加连接器、插件、外部工具都落在这里，
+             不会再和「用知识库」的日常操作混在一起。 -->
+        <div v-if="!sidebarCollapsed" class="nav-group-label">扩展</div>
+        <el-tooltip content="Agent 与技能" placement="right" :disabled="!sidebarCollapsed" :show-after="120">
+          <router-link to="/settings/agents" class="nav-item" :class="{ active: activeMenu === '/settings/agents' }">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 7h4M14 7h6M4 17h6M16 17h4" />
+              <circle cx="11" cy="7" r="2.4" />
+              <circle cx="13" cy="17" r="2.4" />
+            </svg>
+            <span>Agent 与技能</span>
+          </router-link>
+        </el-tooltip>
       </nav>
 
       <div class="sidebar-bottom">
@@ -97,7 +114,7 @@
     <div class="app-main">
       <header class="topbar">
         <div class="breadcrumb">
-          <span>知识库管理</span>
+          <span>{{ brand.app_name }}</span>
           <span>/</span>
           <b>{{ title }}</b>
         </div>
@@ -129,6 +146,10 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import axios from 'axios'
+import BrandMark from './components/BrandMark.vue'
+// 名称、副标题、图标由后端配置：页面可随时改，不必重新打包。
+import { brand, loadBrand } from './brand'
+import { applyAppearance } from './appearance'
 
 type Theme = 'light' | 'dark'
 
@@ -178,6 +199,8 @@ function applyTheme(value: Theme) {
   theme.value = value
   document.documentElement.classList.toggle('dark', value === 'dark')
   localStorage.setItem('fa-theme', value)
+  // 强调色分浅/深两档（同一个色值在深底上会发闷），模式一变要重算。
+  applyAppearance(brand.value.theme, brand.value.radius, brand.value.font_size, brand.value.font_family)
 }
 
 function toggleTheme() {
@@ -185,6 +208,9 @@ function toggleTheme() {
 }
 
 onMounted(() => {
+  // 品牌配置最先拉：标签页标题和图标要在首屏就正确，
+  // 否则用户会先看到默认名再跳变。
+  loadBrand()
   const saved = localStorage.getItem('fa-theme')
   const preferred = window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
   applyTheme(saved === 'dark' || saved === 'light' ? saved : preferred)
@@ -206,16 +232,26 @@ const labels: Record<string, string> = {
   '/documents': '文档库',
   '/agents': 'Agent 与技能',
   '/settings': '设置',
+  '/settings/brand': '系统外观',
+  '/settings/instance': '实例配置',
   '/settings/models': '模型服务',
   '/settings/web-search': '联网搜索',
+  '/settings/retrieval': '检索参数',
+  '/settings/memory': '记忆与上下文',
   '/settings/agents': 'Agent 与技能',
 }
 const activeMenu = computed(() => {
   if (route.path.startsWith('/units')) return '/units'
+  // Agent 与技能在「扩展」组里有自己的入口，不该同时点亮底部的设置。
+  if (route.path === '/settings/agents') return '/settings/agents'
   if (route.path.startsWith('/settings')) return '/settings'
   return route.path
 })
-const title = computed(() => (route.path.startsWith('/units/') ? '知识库详情' : labels[route.path] || ''))
+const title = computed(() => {
+  if (route.path.startsWith('/units/')) return '知识库详情'
+  // 没登记的设置子页至少回落成「设置」，面包屑不留空档。
+  return labels[route.path] || (route.path.startsWith('/settings') ? '设置' : '')
+})
 </script>
 <style scoped>
 .job-pill {
@@ -224,7 +260,7 @@ const title = computed(() => (route.path.startsWith('/units/') ? '知识库详�
   gap: 8px;
   padding: 5px 12px;
   border-radius: 999px;
-  font-size: 12px;
+  font-size: calc(12px * var(--fs-scale));
   font-weight: 600;
   text-decoration: none;
   color: var(--text, inherit);

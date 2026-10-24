@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-label="知识库管理">
+  <title>知识库管理</title>
+  <!-- 文档本体：右上折角。16px 下折角会消失，但深色轮廓仍然成立，
+       所以标记不依赖任何单一线条才能被认出。 -->
+  <path fill="#171717" d="M1 9a8 8 0 0 1 8-8h12l10 10v12a8 8 0 0 1-8 8H9a8 8 0 0 1-8-8V9Z"/>
+  <!-- 折面：读作翻起的页角，而不是缺了一块的方块。 -->
+  <path fill="#ffffff" fill-opacity="0.2" d="M21 1 31 11H21V1Z"/>
+  <!-- 三条片段线。中间那条用强调色、最长最粗：对应「大量片段里被命中的那一段」，
+       视觉重心天然落在它上面，因此 16px 下也能读出重点。 -->
+  <g fill="none" stroke-linecap="round">
+    <path stroke="#ffffff" stroke-opacity="0.46" stroke-width="2.4" d="M8 12.4h15"/>
+    <path stroke="#10a37f" stroke-width="3" d="M8 18.2h16"/>
+    <path stroke="#ffffff" stroke-opacity="0.46" stroke-width="2.4" d="M8 24h6.5"/>
+  </g>
+</svg>

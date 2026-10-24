@@ -4,7 +4,7 @@
       <div>
         <div class="eyebrow">Model Providers</div>
         <h1>模型服务设置</h1>
-        <p class="subtitle">管理多个模型来源，对话与向量各自选择，切换即时生效</p>
+        <p class="subtitle">管理多个模型来源，对话、向量与重排各自选择，切换即时生效</p>
       </div>
       <div class="head-actions">
         <el-button :loading="loading" @click="load">重新读取</el-button>
@@ -22,11 +22,11 @@
       <div class="card settings-form-card">
         <div class="effective-head">
           <div class="card-title">当前生效</div>
-          <el-button link :loading="testing.llm || testing.embed" @click="testAll">测试连接</el-button>
+          <el-button link :loading="testing.llm || testing.embed || testing.rerank" @click="testAll">测试连接</el-button>
         </div>
 
         <div class="effective-row">
-          <span class="effective-label">对话</span>
+          <span class="effective-label" title="对话模型：读取上下文与工具结果，生成最终回答">对话</span>
           <el-select
             v-model="selection.llm"
             style="width: 240px"
@@ -43,7 +43,7 @@
         </div>
 
         <div class="effective-row">
-          <span class="effective-label">向量</span>
+          <span class="effective-label" title="向量模型：把问题和片段编码成向量，用于语义召回">向量</span>
           <el-select
             v-model="selection.embed"
             style="width: 240px"
@@ -59,7 +59,26 @@
           </span>
         </div>
 
-        <div v-if="testResult?.chat || testResult?.embedding" class="effective-tests">
+        <div class="effective-row">
+          <span class="effective-label" title="重排模型（可选）：对召回的候选片段打分，决定哪些进入上下文；留空则不重排">重排</span>
+          <el-select
+            v-model="selection.rerank"
+            style="width: 240px"
+            :disabled="switching"
+            @change="(value: number) => changeSelection('rerank', Number(value))"
+          >
+            <el-option :value="0" label="手工配置 / 环境变量" />
+            <el-option v-for="p in providersFor('rerank')" :key="p.id" :value="p.id" :label="p.name" />
+          </el-select>
+          <span class="effective-value muted" :title="`${meta.rerank?.base_url || ''} · ${meta.rerank?.model || ''}`">
+            {{ meta.rerank?.model || '未配置' }}
+            <template v-if="meta.rerank?.base_url"> · {{ shortURL(meta.rerank.base_url) }}</template>
+            <template v-if="meta.rerank?.enabled === false"> · 已关闭</template>
+            <em class="optional-badge">可选</em>
+          </span>
+        </div>
+
+        <div v-if="testResult?.chat || testResult?.embedding || testResult?.rerank" class="effective-tests">
           <span v-if="testResult?.chat" class="test-chip">
             对话
             <el-tag size="small" :type="testResult.chat.ok ? 'success' : 'danger'" effect="light">
@@ -79,15 +98,52 @@
             </span>
             <span v-if="testResult.embedding.error" class="err">{{ testResult.embedding.error }}</span>
           </span>
+          <span v-if="testResult?.rerank" class="test-chip">
+            重排
+            <el-tag size="small" :type="testResult.rerank.ok ? 'success' : 'danger'" effect="light">
+              {{ testResult.rerank.ok ? '正常' : '失败' }}
+            </el-tag>
+            <span class="muted">{{ testResult.rerank.latency_ms }} ms</span>
+            <span v-if="testResult.rerank.error" class="err">{{ testResult.rerank.error }}</span>
+          </span>
         </div>
-        <div v-if="testError.llm || testError.embed" class="err">{{ testError.llm || testError.embed }}</div>
+        <div v-if="testError.llm || testError.embed || testError.rerank" class="err">
+          {{ testError.llm || testError.embed || testError.rerank }}
+        </div>
+
+        <div class="role-hints">
+          <div class="role-hint">
+            <div class="role-hint-head"><b>对话</b><span>生成回答</span></div>
+            <p>
+              自回归生成：把系统提示、检索到的片段、工具定义和对话历史一起送入模型，
+              由它决定是否调用工具、以及如何组织最终答案。
+            </p>
+            <p class="role-hint-meta">每轮 1–6 次调用 · 换模型立即生效，不需要重建索引</p>
+          </div>
+          <div class="role-hint">
+            <div class="role-hint-head"><b>向量</b><span>语义召回</span></div>
+            <p>
+              双塔 embedding：把文本编码成定长向量，检索时按余弦距离取最近的片段。
+              它决定「能不能找到」，不判断「该不该答」。
+            </p>
+            <p class="role-hint-meta">索引时按批编码 · 每次提问 1 次 · 换模型或维度必须重建索引</p>
+          </div>
+          <div class="role-hint">
+            <div class="role-hint-head"><b>重排</b><span>精排与拒答</span><em class="optional-badge">可选</em></div>
+            <p>
+              交叉编码器：把问题和每个候选片段成对输入，输出 0–1 相关度。
+              低于阈值的片段直接丢弃，因此它也是「没有依据就拒答」的闸门。
+            </p>
+            <p class="role-hint-meta">每次检索 1 次，最多 20 条 · 留空即不重排 · 不需要重建索引</p>
+          </div>
+        </div>
       </div>
 
       <div class="card settings-form-card">
         <div class="effective-head">
           <div>
             <div class="card-title">模型来源</div>
-            <div class="muted">本地服务（Ollama / LM Studio / vLLM）地址填到 <code>/v1</code>，API Key 可留空</div>
+            <div class="muted">一个来源可以同时提供对话、向量、重排三种能力，也可以拆到多个来源；本地服务地址填到 <code>/v1</code>，API Key 可留空</div>
           </div>
         </div>
 
@@ -101,11 +157,13 @@
               {{ p.name }}
               <el-tag v-if="p.active_llm" size="small" type="success" effect="light">对话中</el-tag>
               <el-tag v-if="p.active_embed" size="small" type="warning" effect="light">向量中</el-tag>
+              <el-tag v-if="p.active_rerank" size="small" type="info" effect="light">重排中</el-tag>
             </div>
             <div class="provider-meta muted">
               <span class="nowrap">{{ shortURL(p.base_url) }}</span>
               <span>对话 {{ p.llm_model || '—' }}</span>
               <span>向量 {{ p.embed_model || '—' }}</span>
+              <span>重排 {{ p.rerank_model || '—' }}</span>
               <span>{{ keyText(p) }}</span>
             </div>
             <div v-if="providerTest[p.id]" class="provider-test">
@@ -134,6 +192,14 @@
             >
               用作向量
             </el-button>
+            <el-button
+              size="small"
+              :type="p.active_rerank ? 'info' : 'default'"
+              :disabled="!p.rerank_model || p.active_rerank || switching"
+              @click="changeSelection('rerank', p.id)"
+            >
+              用作重排
+            </el-button>
             <el-dropdown trigger="click" @command="(cmd: string) => onProviderCommand(cmd, p)">
               <el-button size="small" :loading="providerTesting[p.id]">更多</el-button>
               <template #dropdown>
@@ -152,7 +218,7 @@
         <el-collapse-item name="manual" title="手工配置（未选择来源时生效，一般不常用）">
           <div class="manual-grid">
             <div class="manual-col">
-              <div class="manual-title">对话模型</div>
+              <div class="manual-title">对话模型 <span class="manual-hint">生成回答</span></div>
               <el-form label-position="top">
                 <el-form-item label="Base URL">
                   <el-input v-model="form.llm_base_url" placeholder="http://localhost:11434/v1" clearable />
@@ -173,7 +239,7 @@
             </div>
 
             <div class="manual-col">
-              <div class="manual-title">向量模型</div>
+              <div class="manual-title">向量模型 <span class="manual-hint">语义召回</span></div>
               <el-form label-position="top">
                 <el-form-item label="Base URL">
                   <el-input v-model="form.embed_base_url" placeholder="http://localhost:11434/v1" clearable />
@@ -193,6 +259,22 @@
                 </el-form-item>
               </el-form>
             </div>
+
+            <div class="manual-col">
+              <div class="manual-title">重排模型 <span class="manual-hint">精排与拒答 · 可选</span></div>
+              <el-form label-position="top">
+                <el-form-item label="Base URL">
+                  <el-input v-model="form.rerank_base_url" placeholder="留空沿用对话模型地址" clearable />
+                </el-form-item>
+                <el-form-item label="API Key">
+                  <el-input v-model="form.rerank_api_key" type="password" show-password :placeholder="keyPlaceholder(meta.rerank)" />
+                </el-form-item>
+                <el-form-item label="模型">
+                  <el-input v-model="form.rerank_model" placeholder="BAAI/bge-reranker-v2-m3" clearable />
+                  <div class="muted" style="margin-top: 4px">用于检索结果精排；留空则不重排</div>
+                </el-form-item>
+              </el-form>
+            </div>
           </div>
           <div class="manual-actions">
             <el-button type="primary" :loading="saving" @click="save">保存手工配置</el-button>
@@ -201,7 +283,7 @@
       </el-collapse>
 
       <div class="muted footnote">
-        生效顺序：选中的来源 → 手工配置 → 环境变量。更换 embedding 模型或维度后需重建索引。
+        生效顺序：选中的来源 → 手工配置 → 环境变量。更换 embedding 模型或维度后需重建索引；重排模型可随时切换，不需要重建。
       </div>
     </div>
 
@@ -264,6 +346,9 @@
             </div>
             <div v-if="dialogListError.embed" class="err">{{ dialogListError.embed }}</div>
           </el-form-item>
+          <el-form-item label="重排模型（可选）">
+            <el-input v-model="dialog.form.rerank_model" placeholder="BAAI/bge-reranker-v2-m3" clearable />
+          </el-form-item>
         </div>
         <div class="muted">至少填写一个模型；留空的角色表示该来源不提供该能力</div>
       </el-form>
@@ -309,21 +394,25 @@ type ProviderItem = {
   base_url: string
   llm_model?: string
   embed_model?: string
+  rerank_model?: string
   api_key_set?: boolean
   api_key_hint?: string
   active_llm?: boolean
   active_embed?: boolean
+  active_rerank?: boolean
   local_endpoint?: boolean
 }
 
 type SettingsMeta = {
   embed?: ProviderMeta
   llm?: ProviderMeta
+  rerank?: ProviderMeta & { enabled?: boolean; min_score?: number }
   providers?: ProviderItem[]
-  selection?: { llm?: number; embed?: number }
+  selection?: { llm?: number; embed?: number; rerank?: number }
   manual?: {
     embed?: { base_url?: string; model?: string }
     llm?: { base_url?: string; model?: string }
+    rerank?: { base_url?: string; model?: string }
   }
   embedding_dimensions?: number
 }
@@ -331,6 +420,7 @@ type SettingsMeta = {
 type TestResult = {
   embedding?: { ok: boolean; latency_ms: number; dimensions?: number; error?: string }
   chat?: { ok: boolean; latency_ms: number; error?: string }
+  rerank?: { ok: boolean; latency_ms: number; error?: string }
 }
 
 type ModelItem = {
@@ -352,10 +442,10 @@ const saveError = ref('')
 const dimensions = ref(1024)
 const meta = ref<SettingsMeta>({})
 const providers = ref<ProviderItem[]>([])
-const selection = reactive({ llm: 0, embed: 0 })
+const selection = reactive({ llm: 0, embed: 0, rerank: 0 })
 const testResult = ref<TestResult | null>(null)
-const testing = reactive({ embed: false, llm: false })
-const testError = reactive({ embed: '', llm: '' })
+const testing = reactive({ embed: false, llm: false, rerank: false })
+const testError = reactive({ embed: '', llm: '', rerank: '' })
 const providerTest = reactive<Record<number, { ok: boolean; latency_ms: number; error?: string }>>({})
 const providerTesting = reactive<Record<number, boolean>>({})
 const manualOpen = ref<string[]>([])
@@ -368,6 +458,9 @@ const form = reactive({
   llm_base_url: '',
   llm_model: '',
   llm_api_key: '',
+  rerank_base_url: '',
+  rerank_model: '',
+  rerank_api_key: '',
 })
 
 const embedModelOptions = ref(['bge-m3', 'BAAI/bge-m3', 'mxbai-embed-large'])
@@ -380,7 +473,7 @@ const dialog = reactive({
   id: 0,
   apiKeySet: false,
   apiKeyHint: '',
-  form: { name: '', base_url: '', api_key: '', llm_model: '', embed_model: '' },
+  form: { name: '', base_url: '', api_key: '', llm_model: '', embed_model: '', rerank_model: '' },
 })
 const dialogOptions = reactive({ llm: [] as string[], embed: [] as string[] })
 const dialogFetching = reactive({ llm: false, embed: false })
@@ -404,8 +497,10 @@ function keyText(p: ProviderItem) {
   return p.local_endpoint ? '免 Key' : '未配置 Key'
 }
 
-function providersFor(role: 'llm' | 'embed') {
-  return providers.value.filter((p) => (role === 'llm' ? !!p.llm_model : !!p.embed_model))
+function providersFor(role: 'llm' | 'embed' | 'rerank') {
+  return providers.value.filter((p) =>
+    role === 'llm' ? !!p.llm_model : role === 'embed' ? !!p.embed_model : !!p.rerank_model,
+  )
 }
 
 function errorText(e: unknown) {
@@ -426,13 +521,17 @@ async function load() {
     providers.value = res.data?.providers || []
     selection.llm = res.data?.selection?.llm || 0
     selection.embed = res.data?.selection?.embed || 0
+    selection.rerank = res.data?.selection?.rerank || 0
     // 手工配置读 manual，避免把来源值误当成手工值再存回库。
     form.embed_base_url = res.data?.manual?.embed?.base_url || ''
     form.embed_model = res.data?.manual?.embed?.model || ''
     form.llm_base_url = res.data?.manual?.llm?.base_url || ''
     form.llm_model = res.data?.manual?.llm?.model || ''
+    form.rerank_base_url = res.data?.manual?.rerank?.base_url || ''
+    form.rerank_model = res.data?.manual?.rerank?.model || ''
     form.embed_api_key = ''
     form.llm_api_key = ''
+    form.rerank_api_key = ''
     loaded.value = true
   } catch (e) {
     loadError.value = errorText(e)
@@ -442,16 +541,15 @@ async function load() {
   }
 }
 
-async function changeSelection(role: 'llm' | 'embed', providerId: number) {
+async function changeSelection(role: 'llm' | 'embed' | 'rerank', providerId: number) {
   switching.value = true
   saveError.value = ''
   saveOk.value = false
   try {
     await axios.put('/api/v1/settings/models/selection', { role, provider_id: providerId }, { timeout: 15000 })
     await load()
-    saveOkText.value = providerId
-      ? `${role === 'llm' ? '对话' : '向量'}模型已切换。`
-      : `${role === 'llm' ? '对话' : '向量'}模型已回落到手工配置。`
+    const label = role === 'llm' ? '对话' : role === 'embed' ? '向量' : '重排'
+    saveOkText.value = providerId ? `${label}模型已切换。` : `${label}模型已回落到手工配置。`
     saveOk.value = true
   } catch (e) {
     saveError.value = errorText(e)
@@ -503,7 +601,7 @@ function openCreate() {
   dialog.id = 0
   dialog.apiKeySet = false
   dialog.apiKeyHint = ''
-  dialog.form = { name: '', base_url: '', api_key: '', llm_model: '', embed_model: '' }
+  dialog.form = { name: '', base_url: '', api_key: '', llm_model: '', embed_model: '', rerank_model: '' }
   dialogError.value = ''
   dialogTest.value = null
   dialogOptions.llm = [...llmModelOptions.value]
@@ -521,6 +619,7 @@ function openEdit(p: ProviderItem) {
     api_key: '',
     llm_model: p.llm_model || '',
     embed_model: p.embed_model || '',
+    rerank_model: p.rerank_model || '',
   }
   dialogError.value = ''
   dialogTest.value = null
@@ -600,8 +699,8 @@ async function saveDialog() {
     dialogError.value = '请填写 Base URL'
     return
   }
-  if (!dialog.form.llm_model.trim() && !dialog.form.embed_model.trim()) {
-    dialogError.value = '至少填写一个对话模型或向量模型'
+  if (!dialog.form.llm_model.trim() && !dialog.form.embed_model.trim() && !dialog.form.rerank_model.trim()) {
+    dialogError.value = '至少填写一个对话、向量或重排模型'
     return
   }
   const payload: Record<string, string> = {
@@ -609,6 +708,7 @@ async function saveDialog() {
     base_url: baseURL,
     llm_model: dialog.form.llm_model.trim(),
     embed_model: dialog.form.embed_model.trim(),
+    rerank_model: dialog.form.rerank_model.trim(),
   }
   if (dialog.form.api_key.trim()) payload.api_key = dialog.form.api_key.trim()
 
@@ -668,10 +768,13 @@ async function save() {
     embed_model: form.embed_model.trim(),
     llm_base_url: form.llm_base_url.trim(),
     llm_model: form.llm_model.trim(),
+    rerank_base_url: form.rerank_base_url.trim(),
+    rerank_model: form.rerank_model.trim(),
   }
   // 只有用户实际输入了新的 key 才提交，避免用空值覆盖已保存的凭据。
   if (form.embed_api_key.trim()) payload.embed_api_key = form.embed_api_key.trim()
   if (form.llm_api_key.trim()) payload.llm_api_key = form.llm_api_key.trim()
+  if (form.rerank_api_key.trim()) payload.rerank_api_key = form.rerank_api_key.trim()
 
   try {
     await axios.put('/api/v1/settings/models', payload, { timeout: 15000 })
@@ -685,11 +788,12 @@ async function save() {
   }
 }
 
-async function test(kind: 'embed' | 'llm') {
+async function test(kind: 'embed' | 'llm' | 'rerank') {
   testing[kind] = true
   testError[kind] = ''
   const current = testResult.value || {}
   if (kind === 'embed') delete current.embedding
+  else if (kind === 'rerank') delete current.rerank
   else delete current.chat
   testResult.value = { ...current }
   try {
@@ -703,7 +807,7 @@ async function test(kind: 'embed' | 'llm') {
 }
 
 async function testAll() {
-  await Promise.all([test('llm'), test('embed')])
+  await Promise.all([test('llm'), test('embed'), test('rerank')])
 }
 
 onMounted(load)
@@ -725,13 +829,13 @@ onMounted(load)
 }
 .effective-label {
   width: 40px;
-  font-size: 13px;
+  font-size: calc(13px * var(--fs-scale));
   color: var(--text-muted);
 }
 .effective-value {
   flex: 1;
   min-width: 0;
-  font-size: 13px;
+  font-size: calc(13px * var(--fs-scale));
   color: var(--text-secondary);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -749,7 +853,7 @@ onMounted(load)
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: 13px;
+  font-size: calc(13px * var(--fs-scale));
 }
 .provider-empty {
   padding: 16px;
@@ -780,7 +884,7 @@ onMounted(load)
   flex-wrap: wrap;
   gap: 10px;
   margin-top: 6px;
-  font-size: 13px;
+  font-size: calc(13px * var(--fs-scale));
 }
 .nowrap {
   white-space: nowrap;
@@ -794,7 +898,7 @@ onMounted(load)
   align-items: center;
   gap: 8px;
   margin-top: 8px;
-  font-size: 13px;
+  font-size: calc(13px * var(--fs-scale));
 }
 .provider-actions {
   display: flex;
@@ -808,14 +912,71 @@ onMounted(load)
   padding: 4px 16px;
   background: var(--bg-subtle);
 }
+.optional-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 5px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-subtle);
+  color: var(--text-muted);
+  font-size: calc(10px * var(--fs-scale));
+  font-style: normal;
+  line-height: 15px;
+  vertical-align: 1px;
+}
+.role-hints {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+.role-hint {
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--bg-subtle);
+}
+.role-hint-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.role-hint-head b {
+  font-size: calc(13px * var(--fs-scale));
+  font-weight: 600;
+  color: var(--text);
+}
+.role-hint-head span {
+  font-size: calc(11px * var(--fs-scale));
+  color: var(--accent);
+}
+.role-hint p {
+  margin: 0;
+  font-size: calc(11.5px * var(--fs-scale));
+  line-height: 1.7;
+  color: var(--text-muted);
+}
+.role-hint p.role-hint-meta {
+  margin-top: 6px;
+  color: var(--text-secondary);
+}
+.manual-hint {
+  margin-left: 6px;
+  font-size: calc(11px * var(--fs-scale));
+  font-weight: 400;
+  color: var(--text-muted);
+}
 .manual-grid {
   display: grid;
   gap: 20px;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   padding-top: 8px;
 }
 .manual-title {
-  font-size: 14px;
+  font-size: calc(14px * var(--fs-scale));
   font-weight: 600;
   margin-bottom: 8px;
 }
@@ -837,10 +998,10 @@ onMounted(load)
 }
 .err {
   color: var(--danger, #d9534f);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs-scale));
 }
 .footnote {
-  font-size: 12px;
+  font-size: calc(12px * var(--fs-scale));
 }
 
 @media (max-width: 860px) {

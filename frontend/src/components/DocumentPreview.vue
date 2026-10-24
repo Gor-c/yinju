@@ -157,7 +157,7 @@ watch(() => [props.src, props.filename], load)
 
 .preview-notice {
   margin-bottom: 8px;
-  font-size: 12px;
+  font-size: calc(12px * var(--fs-scale));
 }
 
 /* Office/PDF documents are authored on a white page; keep it white in dark mode. */
@@ -175,13 +175,13 @@ watch(() => [props.src, props.filename], load)
   padding: 18px 20px;
   white-space: pre-wrap;
   word-break: break-word;
-  font-size: 13px;
+  font-size: calc(13px * var(--fs-scale));
   line-height: 1.75;
   font-family: inherit;
 }
 
 .markdown-body {
-  font-size: 14px;
+  font-size: calc(14px * var(--fs-scale));
   white-space: normal;
 }
 </style>

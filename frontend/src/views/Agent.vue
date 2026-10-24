@@ -1,9 +1,20 @@
 <template>
-  <div class="chat-page">
+  <div class="chat-page" :class="{ 'has-side': !sideCollapsed }">
     <div class="chat-main">
     <header class="chat-header">
       <div class="chat-header-heading">
-        <h1>{{ activeConversationTitle }}</h1>
+        <h1>{{ headerTitle }}</h1>
+        <p class="chat-header-meta">
+          <template v-if="primaryProfile">
+            <span v-if="primaryProfile.unit_type" class="meta-strong">{{ primaryProfile.unit_type }}</span>
+            <span>{{ primaryProfile.document_count || 0 }} 份文档</span>
+            <span v-if="outlineTotal">{{ outlineTotal }} 个章节</span>
+            <span>{{ primaryProfile.indexed_chunks || 0 }} 个片段</span>
+          </template>
+          <template v-else>未选择知识库，按通用对话回答</template>
+        </p>
+      </div>
+      <div class="chat-header-actions">
         <el-select
           v-model="expert"
           class="chat-model-select"
@@ -17,26 +28,53 @@
     </header>
     <div v-if="configError" class="notice error">{{ configError }}</div>
 
-    <div class="chat-scroll" ref="scroll">
+    <div class="chat-scroll" :class="{ 'is-empty': !messages.length }" ref="scroll">
       <div v-if="!messages.length" class="chat-empty">
-        <div class="empty-logo">知</div>
-        <h2>{{ emptyStateTitle }}</h2>
-        <p>{{ emptyStateDescription }}</p>
-        <div class="suggestions">
-          <button v-for="item in suggestions" :key="item.prompt" class="suggestion" type="button" :disabled="busy" @click="useSuggestedPrompt(item.prompt)">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-              <path :d="item.icon" />
-            </svg>
-            <b>{{ item.title }}</b>
-            <span>{{ item.desc }}</span>
+        <div class="ce-cover">
+          <h2>{{ emptyStateTitle }}</h2>
+          <p class="ce-desc">{{ emptyStateDescription }}</p>
+        </div>
+
+        <!-- 从「卡片墙」改成「问题清单」：一行一问，序号负责扫读，来源负责可信。
+             原来的三张等宽卡片说的是「你能干什么」，换哪个库都一样。 -->
+        <div class="ce-list">
+          <div class="ce-list-head">
+            <span>从这里开始</span>
+            <span v-if="examplesLoading" class="ce-list-note">正在读取章节…</span>
+            <span v-else-if="realExamples.length" class="ce-list-note">来自本库章节，已验证可检索</span>
+          </div>
+          <button
+            v-for="(item, i) in suggestions"
+            :key="item.prompt"
+            class="ce-item"
+            type="button"
+            :disabled="busy"
+            @click="useSuggestedPrompt(item.prompt)"
+          >
+            <span class="ce-index">{{ String(i + 1).padStart(2, '0') }}</span>
+            <span class="ce-text">{{ item.title }}</span>
+            <!-- 同一个库的问题多半出自同一份文档，逐行重复文件名只是噪声。 -->
+            <span class="ce-source">{{ i === 0 || item.source !== suggestions[i - 1].source ? item.source : '' }}</span>
+            <span class="ce-go" aria-hidden="true">→</span>
           </button>
+        </div>
+
+        <div v-if="outlineChapters.length" class="ce-chapters">
+          <span class="ce-chapters-label">覆盖章节</span>
+          <button
+            v-for="c in outlineChapters"
+            :key="c"
+            type="button"
+            class="ce-chapter"
+            @click="useSuggestedPrompt(`《${c}》主要讲了什么？`)"
+          >{{ c }}</button>
         </div>
       </div>
 
       <div v-else class="message-list">
         <div v-for="(m, i) in messages" :key="i" :class="['message', m.role]">
           <template v-if="m.role === 'assistant'">
-            <div class="avatar">知</div>
+            <div class="avatar"><BrandMark :size="22" /></div>
             <div class="message-body">
               <div v-if="m.preface" class="message-content md-body message-preface" v-html="renderMarkdownText(m.preface)"></div>
               <div v-if="m.notice" class="message-notice">
@@ -77,7 +115,12 @@
                 </div>
               </div>
 
-              <div v-if="m.content" class="message-content md-body" v-html="renderMarkdown(m, isActive(i) && busy && !status)"></div>
+              <div
+                v-if="m.content"
+                class="message-content md-body"
+                v-html="renderMarkdown(m, isActive(i) && busy && !status)"
+                @click="onAnswerClick($event, m)"
+              ></div>
 
               <div v-if="m.citations && m.citations.length" class="sources">
                 <div class="sources-title">引用来源 · {{ m.citations.length }}</div>
@@ -99,8 +142,16 @@
                     <template v-else>
                       {{ c.filename }}
                       <span class="source-meta">
-                        {{ c.unit_name ? `${c.unit_name} · ` : '' }}{{ c.doc_type || '文档' }}<template v-if="c.distance !== undefined"> · {{ c.distance.toFixed(3) }}</template>
+                        {{ c.unit_name ? `${c.unit_name} · ` : '' }}{{ c.doc_type || '文档' }}<template v-if="c.doc_id && typeof c.chunk_index === 'number' && c.chunk_index >= 0"> · 第 {{ c.chunk_index }} 块</template>
                       </span>
+                      <button
+                        v-if="c.doc_id && c.unit_id"
+                        class="text-btn"
+                        type="button"
+                        @click.stop="openChunk(c)"
+                      >
+                        查看原文
+                      </button>
                     </template>
                   </summary>
                   <p>{{ preview(c.content) }}</p>
@@ -233,6 +284,7 @@
           <div class="side-section">
             <div class="side-label">已加入的知识库</div>
             <el-select
+              ref="kbPickerRef"
               v-model="unitIds"
               multiple
               collapse-tags
@@ -241,6 +293,7 @@
               placeholder="选择知识库"
               :disabled="busy"
               style="width: 100%"
+              @change="onUnitIdsChange"
             >
               <el-option v-for="u in units" :key="u.unit_id" :label="u.name" :value="u.unit_id" />
             </el-select>
@@ -251,12 +304,14 @@
             <div v-for="p in profiles" :key="p.unit_id" class="kb-card">
               <div class="kb-card-head">
                 <b>{{ p.name }}</b>
-                <span class="kb-type">{{ p.unit_type || '未分类' }}</span>
+                <!-- 没填分类时不再显示「未分类」：它只是在提醒用户「你没填」，
+                     而顶栏已经给出了这个库的身份。 -->
+                <span v-if="p.unit_type" class="kb-type">{{ p.unit_type }}</span>
               </div>
-              <div class="kb-meta">{{ p.document_count ? `${p.document_count} 篇文档` : '暂无文档' }}</div>
-              <div class="kb-stats">
-                <span>文本块 {{ p.indexed_chunks }}</span>
-                <span v-if="p.tags?.length">{{ p.tags.join(' / ') }}</span>
+              <!-- 文档数、片段数已经在顶栏给出，这里只留「能展开看什么」的入口。
+                   同一组数字在页面上说两遍，只会削弱顶栏那一行。 -->
+              <div v-if="p.tags?.length" class="kb-stats">
+                <span>{{ p.tags.join(' / ') }}</span>
               </div>
               <div class="kb-card-foot">
                 <button class="link-btn" type="button" @click="toggleKbDocs(p.unit_id)">
@@ -417,6 +472,15 @@
       </template>
     </el-drawer>
 
+    <ChunkDrawer
+      v-model="chunkDrawer"
+      :unit-id="chunkTarget.unitId"
+      :filename="chunkTarget.filename"
+      :doc-id="chunkTarget.docId"
+      :doc-type="chunkTarget.docType"
+      :focus-index="chunkTarget.chunkIndex"
+    />
+
     <el-dialog v-model="docDialog" :title="docName || '文档预览'" width="min(1100px, 94vw)" top="4vh">
       <DocumentPreview v-if="docDialog && docName" :src="docSrc" :filename="docName" />
       <template #footer>
@@ -432,8 +496,10 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import axios from 'axios'
+import ChunkDrawer from '../components/ChunkDrawer.vue'
+import BrandMark from '../components/BrandMark.vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import DocumentPreview from '../components/DocumentPreview.vue'
 import { marked } from 'marked'
@@ -462,6 +528,8 @@ interface SuggestedTask {
   desc: string
   prompt: string
   icon: string
+  // 来源文档名：清单里靠它说明「这个问题从哪来」，比一句「点击直接提问」有用。
+  source?: string
 }
 interface Expert {
   id: string
@@ -482,6 +550,9 @@ interface Citation {
   unit_name?: string
   filename?: string
   doc_type?: string
+  doc_id?: string
+  chunk_index?: number
+  score?: number
   title?: string
   url?: string
   site?: string
@@ -518,14 +589,42 @@ interface ConversationItem {
 }
 
 // 流式输出时同一条消息会被反复渲染，按内容缓存可避免重复解析整段 Markdown。
-const markdownCache = new WeakMap<Msg, { text: string; html: string }>()
+// 缓存键要带上引用条数：引用可能晚于正文到达，条数变了编号映射也会变。
+const markdownCache = new WeakMap<Msg, { text: string; html: string; count: number }>()
+
+// 把「[2]」渲染成可点的角标。
+//
+// 两个安全边界：
+// 1. 只认 1..当前引用条数的编号，模型编出来的 [9] 原样保留成文字，不会变成链接；
+// 2. 代码块里的方括号不动（[0] 这类下标在代码里很常见）。
+function decorateCitations(html: string, count: number) {
+  const parts = html.split(/(<[^>]+>)/)
+  let codeDepth = 0
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i]
+    if (part.startsWith('<')) {
+      if (/^<(pre|code)\b/i.test(part)) codeDepth++
+      else if (/^<\/(pre|code)\s*>/i.test(part)) codeDepth = Math.max(0, codeDepth - 1)
+      continue
+    }
+    if (codeDepth > 0 || !part.includes('[')) continue
+    parts[i] = part.replace(/\[(\d{1,2})\]/g, (all, digits) => {
+      const n = Number(digits)
+      if (n < 1 || n > count) return all
+      return `<sup class="cite-ref" data-cite="${n}">${n}</sup>`
+    })
+  }
+  return parts.join('')
+}
 
 function markdownToHtml(message: Msg) {
+  const count = message.citations?.length || 0
   const cached = markdownCache.get(message)
-  if (cached && cached.text === message.content) return cached.html
+  if (cached && cached.text === message.content && cached.count === count) return cached.html
   // 模型输出可能包含原始 HTML，必须先清洗再交给 v-html。
-  const html = DOMPurify.sanitize(marked.parse(message.content || '') as string)
-  markdownCache.set(message, { text: message.content, html })
+  const sanitized = DOMPurify.sanitize(marked.parse(message.content || '') as string)
+  const html = decorateCitations(sanitized, count)
+  markdownCache.set(message, { text: message.content, html, count })
   return html
 }
 
@@ -551,7 +650,22 @@ const toolLabels: Record<string, string> = {
   vector_search: '检索知识库',
 }
 
+// 点角标直接看这一句的原文，而不是滚到文末列表里再对一遍编号。
+function onAnswerClick(e: MouseEvent, m: Msg) {
+  const target = (e.target as HTMLElement | null)?.closest?.('.cite-ref') as HTMLElement | null
+  if (!target) return
+  const index = Number(target.dataset.cite || 0)
+  const citation = m.citations?.[index - 1]
+  if (!citation) return
+  if (citation.source_type === 'web') {
+    if (citation.url) window.open(citation.url, '_blank', 'noopener')
+    return
+  }
+  if (citation.doc_id && citation.unit_id) openChunk(citation)
+}
+
 const route = useRoute()
+const router = useRouter()
 const units = ref<Unit[]>([])
 const experts = ref<Expert[]>([])
 const skills = ref<Skill[]>([])
@@ -577,18 +691,86 @@ const configReady = ref(false)
 const conversationId = ref('')
 const sideTab = ref('kb')
 const sideCollapsed = ref(localStorage.getItem('kb-agent-side-collapsed') === '1')
+const kbPickerRef = ref<any>(null)
+
+// 选中后收起下拉：侧栏高度有限，下拉展开会盖住刚出现的知识库概览，
+// 用户必须再点一下空白才能看到自己选了什么，多一步且容易以为没生效。
+function onUnitIdsChange() {
+  nextTick(() => kbPickerRef.value?.blur?.())
+}
 
 const primaryProfile = computed(() => profiles.value[0])
+// 顶栏显示「当前在问哪个库」，而不是「第几个会话」。库是这页的主语，
+// 会话标题只在没有选库时才补位。
+const headerTitle = computed(() =>
+  primaryProfile.value ? primaryProfile.value.name : activeConversationTitle.value,
+)
 const emptyStateTitle = computed(() =>
   primaryProfile.value
-    ? `想从「${primaryProfile.value.name}」了解什么？`
+    ? `从「${primaryProfile.value.name}」里找什么？`
     : '先选择知识库，或直接开始对话',
 )
 const emptyStateDescription = computed(() =>
   primaryProfile.value
-    ? '可以从下面的常见任务开始，也可以直接描述你最终想解决的问题。'
-    : '选择知识库后，我会根据其中内容提供更适合的问题示例。',
+    ? '下面这些问题来自本库的章节，已用当前检索参数验证过能命中；也可以直接描述你要解决的问题。'
+    : '选择一个知识库后，这里会列出它真正能回答的问题。',
 )
+
+// 选中知识库后，用该库真实章节生成的问题替换通用任务卡。
+// 通用卡（「理解一份资料」）说的是能干什么，真实问题说的是这里有什么——
+// 后者才让人一进来就知道该问什么。
+const realExamples = ref<Array<{ question: string; source: string; doc_name: string }>>([])
+const examplesLoading = ref(false)
+const outlineTotal = ref(0)
+const outlineChapters = ref<string[]>([])
+// 快速切库时，先发的请求可能后到；用序号丢弃过期响应。
+let profileDigestSeq = 0
+
+watch(
+  primaryProfile,
+  async (profile) => {
+    const seq = ++profileDigestSeq
+    realExamples.value = []
+    outlineChapters.value = []
+    outlineTotal.value = 0
+    if (!profile) return
+    examplesLoading.value = true
+
+    // 章节与示例并行：示例要跑真实检索，慢得多，不该拖住章节展示。
+    axios
+      .get(`/api/v1/units/${profile.unit_id}/outline`, { timeout: 20000 })
+      .then(({ data }) => {
+        if (seq !== profileDigestSeq) return
+        outlineTotal.value = data.total || 0
+        const all = (data.documents || []).flatMap((d: any) => d.entries || [])
+        const majors = all.filter((e: any) => e.level === 1)
+        const pool = majors.length ? majors : all
+        outlineChapters.value = [...new Set(pool.map((e: any) => e.title))].slice(0, 6) as string[]
+      })
+      .catch(() => {
+        // 抽不出章节不影响提问，静默降级。
+      })
+
+    try {
+      const { data } = await axios.get(`/api/v1/units/${profile.unit_id}/examples`, {
+        params: { limit: 4 },
+        timeout: 30000,
+      })
+      if (seq !== profileDigestSeq) return
+      realExamples.value = data.questions || []
+    } catch {
+      if (seq === profileDigestSeq) realExamples.value = []
+    } finally {
+      if (seq === profileDigestSeq) examplesLoading.value = false
+    }
+  },
+  { immediate: true },
+)
+
+// 「「质量管理职责」主要规定了什么？」→「质量管理职责」
+// 章级标题用「」，文档名用《》：前者不是文件，套书名号会让模型先去否认
+// 「没有这份文档」，答案开头就变成一段免责声明。
+const exampleTitle = (q: string) => q.replace(/^[《「]/, '').replace(/[》」].*$/, '')
 
 const suggestions = computed<SuggestedTask[]>(() => {
   const profile = primaryProfile.value
@@ -613,6 +795,16 @@ const suggestions = computed<SuggestedTask[]>(() => {
         icon: 'M5 6h14M5 12h9M5 18h11M19 15l2 2 3-4',
       },
     ]
+  }
+
+  if (realExamples.value.length) {
+    return realExamples.value.map((q) => ({
+      title: exampleTitle(q.question),
+      desc: q.doc_name || '',
+      prompt: q.question,
+      icon: '',
+      source: q.doc_name || '',
+    }))
   }
 
   const name = `「${profile.name}」`
@@ -700,6 +892,8 @@ function closeSideOnOutsidePointerDown(event: PointerEvent) {
 function openKbPicker() {
   sideTab.value = 'kb'
   if (sideCollapsed.value) toggleSide()
+  // 展开侧栏后直接把选择器打开，省掉「先展开面板、再点下拉」这一步。
+  nextTick(() => kbPickerRef.value?.focus?.())
 }
 const conversations = ref<ConversationItem[]>([])
 const activeConversationTitle = computed(() =>
@@ -852,6 +1046,7 @@ onMounted(async () => {
   }
   configReady.value = true
   await Promise.all([applyProjectConfig(), loadProfiles(), loadConversations()])
+  await runQueriedQuestion()
 })
 
 onUnmounted(() => {
@@ -1065,10 +1260,31 @@ async function copy(text: string) {
   }
 }
 
+// 点示例就等于提问：只把文字填进输入框，用户还得再按一次回车，
+// 这一步没有任何决策价值，反而让「点了没反应」的错觉出现。
 async function useSuggestedPrompt(prompt: string) {
+  if (busy.value) return
   draft.value = prompt
   await nextTick()
   composerInput.value?.focus()
+  await send()
+}
+
+// 从知识库页「能问什么」跳过来时，问题已经在 URL 里，直接发出去。
+let queriedQuestionHandled = ''
+async function runQueriedQuestion() {
+  const value = route.query.q
+  if (!value) return
+  const question = String(value)
+  if (queriedQuestionHandled === question) return
+  queriedQuestionHandled = question
+  draft.value = question
+  await nextTick()
+  await send()
+  // 清掉 URL 里的 q，刷新页面不会重复提问。
+  const rest = { ...route.query }
+  delete rest.q
+  router.replace({ path: route.path, query: rest })
 }
 
 interface RunDetail {
@@ -1094,6 +1310,21 @@ interface RunDetail {
     latency_ms: number
     error: string
   }>
+}
+
+const chunkDrawer = ref(false)
+const chunkTarget = ref<{ unitId?: string; filename?: string; docId?: string; docType?: string; chunkIndex?: number }>({})
+
+// 引用跳转：打开该文档的片段抽屉并高亮被引用的那一块。
+function openChunk(c: Citation) {
+  chunkTarget.value = {
+    unitId: c.unit_id,
+    filename: c.filename,
+    docId: c.doc_id,
+    docType: c.doc_type,
+    chunkIndex: typeof c.chunk_index === 'number' ? c.chunk_index : 0,
+  }
+  chunkDrawer.value = true
 }
 
 const runDrawer = ref(false)

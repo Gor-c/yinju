@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-label="知识库管理">
+  <title>知识库管理</title>
+  <!-- 应用图标版：满版底色、无外圆角（iOS 桌面与 PWA 由系统裁剪），内容缩到 80% 居中。
+       这一版刻意不放折角：没有外轮廓时，折面会读成一个孤立三角形；
+       桌面图标实际显示尺寸也看不清它，去掉反而更干净。
+       识别交给「三条不同长度的线 + 一条强调色」，与带轮廓版本同源。 -->
+  <rect width="32" height="32" fill="#171717"/>
+  <g transform="translate(3.2,3.2) scale(0.8)">
+    <g fill="none" stroke-linecap="round">
+      <path stroke="#ffffff" stroke-opacity="0.46" stroke-width="2.6" d="M8 12h15.5"/>
+      <path stroke="#10a37f" stroke-width="3.2" d="M8 18.2h16"/>
+      <path stroke="#ffffff" stroke-opacity="0.46" stroke-width="2.6" d="M8 24.4h6.5"/>
+    </g>
+  </g>
+</svg>

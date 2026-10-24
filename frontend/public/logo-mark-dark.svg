@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-label="知识库管理">
+  <title>知识库管理</title>
+  <!-- 深底版：底色抬到 #2b2b2b，让「文档」在深色背景上仍是实体。
+       浅底版（logo-mark.svg）用 #171717；两版只差这一个色值，
+       因为 <img> 引用时无法继承页面的 CSS 变量，只能各出一份。 -->
+  <path fill="#2b2b2b" d="M1 9a8 8 0 0 1 8-8h12l10 10v12a8 8 0 0 1-8 8H9a8 8 0 0 1-8-8V9Z"/>
+  <path fill="#ffffff" fill-opacity="0.2" d="M21 1 31 11H21V1Z"/>
+  <g fill="none" stroke-linecap="round">
+    <path stroke="#ffffff" stroke-opacity="0.46" stroke-width="2.4" d="M8 12.4h15"/>
+    <path stroke="#10a37f" stroke-width="3" d="M8 18.2h16"/>
+    <path stroke="#ffffff" stroke-opacity="0.46" stroke-width="2.4" d="M8 24h6.5"/>
+  </g>
+</svg>

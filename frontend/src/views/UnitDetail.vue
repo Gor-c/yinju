@@ -4,7 +4,7 @@
 
     <header class="page-head">
       <div>
-        <div class="eyebrow">Knowledge Base · {{ id }}</div>
+        <div class="eyebrow">Knowledge Base</div>
         <h1>{{ profile?.name || '知识库' }}</h1>
         <p class="subtitle">{{ profile?.unit_type || '知识库' }} · {{ profile?.industry || '未设置行业' }}</p>
         <div v-if="profile?.tags?.length" class="tag-row">
@@ -23,16 +23,52 @@
       <el-button link @click="$router.push('/units')">返回列表</el-button>
     </div>
 
-    <div class="stats" v-loading="loading">
-      <div class="stat">
-        <div class="metric">{{ indexDocs.length || '—' }}</div>
-        <div class="label">已索引文档</div>
+    <!-- 首屏回答「这个库讲了什么」：章节结构比「2 份文档 / 42 个片段」有信息量得多。 -->
+    <section class="unit-framework" v-loading="loading">
+      <div class="uf-head">
+        <div class="uf-stats">
+          <b>{{ outlineTotal }}</b> 个章节
+          <span class="uf-sep">·</span>
+          <b>{{ indexDocs.length || 0 }}</b> 份文档
+          <span class="uf-sep">·</span>
+          <b>{{ profile?.indexed_chunks ?? 0 }}</b> 个片段
+        </div>
+        <div class="uf-head-actions">
+          <router-link class="uf-link" :to="`/units/${id}/outline`">完整目录 →</router-link>
+          <el-button link type="primary" size="small" :loading="extracting" @click="extractOutline">
+            {{ outlineTotal ? '重新提取' : '提取内容框架' }}
+          </el-button>
+        </div>
       </div>
-      <div class="stat">
-        <div class="metric">{{ profile?.indexed_chunks ?? '—' }}</div>
-        <div class="label">已索引文本块</div>
+      <div v-if="outlineGroups.length" class="uf-groups">
+        <div v-for="g in outlineGroups" :key="g.docId" class="uf-group">
+          <div class="uf-group-head">
+            <span class="uf-group-name">{{ g.name }}</span>
+            <span class="uf-group-count">{{ g.entries.length }} 项</span>
+            <button
+              v-if="g.entries.length > 8"
+              type="button"
+              class="uf-group-toggle"
+              @click="toggleDoc(g.docId)"
+            >{{ expanded[g.docId] ? '收起' : '展开全部' }}</button>
+          </div>
+          <div class="uf-list">
+            <span
+              v-for="e in (expanded[g.docId] ? g.entries : g.entries.slice(0, 8))"
+              :key="e.doc_id + e.title"
+              class="uf-item"
+              :class="{ major: e.level === 1 }"
+            >{{ e.title }}</span>
+            <span v-if="!expanded[g.docId] && g.entries.length > 8" class="uf-more">
+              还有 {{ g.entries.length - 8 }} 项
+            </span>
+          </div>
+        </div>
       </div>
-    </div>
+      <p v-else class="uf-empty">
+        还没有可识别的章节结构。表格、扫描件、或没有条款编号的文档抽不出目录，内容仍可正常检索。
+      </p>
+    </section>
 
     <el-tabs v-model="tab" class="tabs unit-detail-tabs">
       <el-tab-pane :label="`文档 ${indexDocs.length ? `(${indexDocs.length})` : ''}`" name="documents">
@@ -64,7 +100,7 @@
               <span class="job-phase" :class="jobStageState(j.phase, j.status, 'index')">索引</span>
             </div>
             <el-progress :percentage="j.progress || 0" :stroke-width="6" />
-            <div class="muted" style="font-size: 12px; margin-top: 4px">
+            <div class="muted" style="font-size: calc(12px * var(--fs-scale)); margin-top: 4px">
               {{ j.doc_type }} · {{ j.chunks || 0 }} 块
               <template v-if="j.attempts"> · 第 {{ j.attempts }} 次尝试</template>
             </div>
@@ -75,7 +111,15 @@
             <div v-for="j in failedJobs" :key="j.job_id" class="failed-row">
               <el-tag size="small" type="danger" effect="light">失败</el-tag>
               <span>{{ j.filename }}</span>
-              <span class="muted">{{ j.message }}</span>
+              <el-tooltip placement="top" :show-after="200">
+                <template #content>
+                  <div class="err-tip">
+                    <p>{{ describeIndexError(j.message).hint }}</p>
+                    <pre v-if="describeIndexError(j.message).raw">{{ describeIndexError(j.message).raw }}</pre>
+                  </div>
+                </template>
+                <span class="muted failed-reason">{{ describeIndexError(j.message).title }}</span>
+              </el-tooltip>
               <el-button link type="primary" size="small" @click="retryIndexJob(j.job_id)">重新解析</el-button>
             </div>
           </div>
@@ -84,7 +128,7 @@
             <el-table-column label="文件名" min-width="260">
               <template #default="s">
                 <div>{{ s.row.filename }}</div>
-                <div class="muted" style="font-size: 11.5px">{{ s.row.doc_id }}</div>
+                <div class="muted" style="font-size: calc(11.5px * var(--fs-scale))">{{ s.row.doc_id }}</div>
               </template>
             </el-table-column>
             <el-table-column prop="doc_type" label="类型" width="120" />
@@ -427,6 +471,7 @@ import { ElMessage } from 'element-plus'
 import { forceCenter, forceCollide, forceLink, forceManyBody, forceSimulation, forceX, forceY } from 'd3-force-3d'
 import DocumentPreview from '../components/DocumentPreview.vue'
 import { jobPhaseLabel, jobStageState } from '../jobPhase'
+import { describeIndexError } from '../utils/indexError'
 
 interface UnitProfile {
   unit_id: string
@@ -494,6 +539,52 @@ interface JobItem {
 const route = useRoute()
 const router = useRouter()
 const id = computed(() => String(route.params.id || ''))
+
+// 内容框架：章节来自 /units/:id/outline，后端在索引完成时已自动抽取。
+const outlineEntries = ref<Array<{ title: string; level: number; doc_id: string; doc_name?: string; chunk_index: number }>>([])
+const outlineTotal = ref(0)
+const extracting = ref(false)
+// 每份文档单独成组：章节脱离文件之后，就没法判断「这段话出自哪一册」。
+const expanded = ref<Record<string, boolean>>({})
+
+const outlineGroups = computed(() => {
+  const map = new Map<string, { docId: string; name: string; entries: typeof outlineEntries.value }>()
+  for (const e of outlineEntries.value) {
+    const key = e.doc_id || e.doc_name || 'unknown'
+    let group = map.get(key)
+    if (!group) {
+      group = { docId: key, name: e.doc_name || '未命名文档', entries: [] }
+      map.set(key, group)
+    }
+    group.entries.push(e)
+  }
+  return [...map.values()]
+})
+
+function toggleDoc(docId: string) {
+  expanded.value = { ...expanded.value, [docId]: !expanded.value[docId] }
+}
+
+async function loadOutline() {
+  try {
+    const { data } = await axios.get(`/api/v1/units/${id.value}/outline`)
+    outlineTotal.value = data.total || 0
+    outlineEntries.value = (data.documents || []).flatMap((d: any) => d.entries || [])
+  } catch {
+    outlineEntries.value = []
+    outlineTotal.value = 0
+  }
+}
+
+async function extractOutline() {
+  extracting.value = true
+  try {
+    await axios.post(`/api/v1/units/${id.value}/outline/extract`)
+    await loadOutline()
+  } finally {
+    extracting.value = false
+  }
+}
 const profile = ref<UnitProfile | null>(null)
 const loading = ref(false)
 const error = ref('')
@@ -1488,6 +1579,7 @@ watch(id, async () => {
 }, { immediate: true })
 
 onMounted(() => {
+  loadOutline()
   loadOptions()
   if (tab.value === 'graph') {
     loadGraph()
@@ -1528,7 +1620,7 @@ onMounted(() => {
   align-items: center;
   gap: 10px;
   padding: 4px 0;
-  font-size: 13px;
+  font-size: calc(13px * var(--fs-scale));
 }
 
 /* 概览只保留文档与文本块两项 */
@@ -1567,13 +1659,13 @@ onMounted(() => {
 .graph-heading > b {
   display: block;
   color: var(--text);
-  font-size: 15px;
+  font-size: calc(15px * var(--fs-scale));
   font-weight: 650;
 }
 .graph-heading > p {
   margin: 4px 0 0;
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: calc(11px * var(--fs-scale));
   line-height: 1.6;
 }
 .graph-header-actions {
@@ -1589,7 +1681,7 @@ onMounted(() => {
   border-radius: 999px;
   background: var(--bg-subtle);
   color: var(--text-muted);
-  font-size: 10px;
+  font-size: calc(10px * var(--fs-scale));
   white-space: nowrap;
 }
 .graph-controls {
@@ -1637,12 +1729,12 @@ onMounted(() => {
 }
 .graph-summary span {
   color: var(--text-muted);
-  font-size: 9px;
+  font-size: calc(9px * var(--fs-scale));
 }
 .graph-summary b {
   overflow: hidden;
   color: var(--text);
-  font-size: 14px;
+  font-size: calc(14px * var(--fs-scale));
   font-weight: 650;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1669,12 +1761,12 @@ onMounted(() => {
 }
 .graph-insight-head b {
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: calc(11px * var(--fs-scale));
   font-weight: 650;
 }
 .graph-insight-head span {
   color: var(--text-muted);
-  font-size: 9px;
+  font-size: calc(9px * var(--fs-scale));
 }
 .graph-insights section > button {
   display: flex;
@@ -1688,7 +1780,7 @@ onMounted(() => {
   background: transparent;
   color: var(--text-secondary);
   font: inherit;
-  font-size: 10px;
+  font-size: calc(10px * var(--fs-scale));
   text-align: left;
   cursor: pointer;
 }
@@ -1712,7 +1804,7 @@ onMounted(() => {
 .graph-insights button > em {
   flex: none;
   color: var(--text-muted);
-  font-size: 9px;
+  font-size: calc(9px * var(--fs-scale));
   font-style: normal;
 }
 .graph-stage {
@@ -1748,7 +1840,7 @@ onMounted(() => {
   border-radius: 7px;
   background: color-mix(in srgb, var(--surface) 92%, transparent);
   color: var(--text-secondary);
-  font-size: 10px;
+  font-size: calc(10px * var(--fs-scale));
   cursor: pointer;
 }
 .graph-fit-btn:hover {
@@ -1767,14 +1859,14 @@ onMounted(() => {
 .graph-side-panel h3 {
   margin: 6px 0 0;
   color: var(--text);
-  font-size: 15px;
+  font-size: calc(15px * var(--fs-scale));
   font-weight: 650;
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
 .graph-side-eyebrow {
   color: var(--accent);
-  font-size: 9px;
+  font-size: calc(9px * var(--fs-scale));
   font-weight: 750;
   letter-spacing: 0.1em;
 }
@@ -1809,27 +1901,27 @@ onMounted(() => {
 }
 .graph-properties dt {
   color: var(--text-muted);
-  font-size: 10px;
+  font-size: calc(10px * var(--fs-scale));
 }
 .graph-properties dd {
   overflow: hidden;
   margin: 0;
   color: var(--text-secondary);
-  font-size: 10px;
+  font-size: calc(10px * var(--fs-scale));
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .graph-description {
   margin: 12px 0 0;
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: calc(11px * var(--fs-scale));
   line-height: 1.7;
   overflow-wrap: anywhere;
 }
 .graph-side-subtitle {
   margin-top: 14px;
   color: var(--text-secondary);
-  font-size: 10px;
+  font-size: calc(10px * var(--fs-scale));
   font-weight: 650;
 }
 .graph-guide-list {
@@ -1837,7 +1929,7 @@ onMounted(() => {
   gap: 10px;
   margin-top: 16px;
   color: var(--text-muted);
-  font-size: 10px;
+  font-size: calc(10px * var(--fs-scale));
 }
 .graph-guide-list span {
   display: flex;
@@ -1887,7 +1979,7 @@ onMounted(() => {
   border-radius: 6px;
   background: color-mix(in srgb, var(--surface) 88%, transparent);
   color: var(--text-muted);
-  font-size: 9px;
+  font-size: calc(9px * var(--fs-scale));
   pointer-events: none;
 }
 .graph-empty {
@@ -1896,7 +1988,7 @@ onMounted(() => {
   z-index: 1;
   display: grid;
   place-items: center;
-  font-size: 13px;
+  font-size: calc(13px * var(--fs-scale));
   pointer-events: none;
 }
 .graph-legend {
@@ -1904,7 +1996,7 @@ onMounted(() => {
   flex-wrap: wrap;
   gap: 4px 14px;
   margin-bottom: 8px;
-  font-size: 12px;
+  font-size: calc(12px * var(--fs-scale));
   color: var(--text-secondary);
 }
 .graph-legend-item {
@@ -1934,7 +2026,7 @@ onMounted(() => {
   gap: 8px;
   padding: 6px 8px;
   border-radius: 6px;
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs-scale));
   cursor: pointer;
 }
 .graph-fallback-item:hover {
@@ -1963,7 +2055,7 @@ onMounted(() => {
   flex-wrap: wrap;
   gap: 4px 14px;
   margin-bottom: 6px;
-  font-size: 12px;
+  font-size: calc(12px * var(--fs-scale));
 }
 .graph-detail {
   position: absolute;
@@ -1978,7 +2070,7 @@ onMounted(() => {
   border-radius: 10px;
   background: var(--bg);
   box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs-scale));
 }
 @media (max-width: 900px) {
   .graph-header {
@@ -2031,7 +2123,7 @@ onMounted(() => {
   background: transparent;
   color: var(--text-secondary);
   font: inherit;
-  font-size: 10px;
+  font-size: calc(10px * var(--fs-scale));
   text-align: left;
   cursor: pointer;
 }
@@ -2048,7 +2140,7 @@ onMounted(() => {
 }
 .graph-rel {
   color: var(--accent);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs-scale));
 }
 .graph-detail-head {
   display: flex;

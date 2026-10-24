@@ -3,7 +3,7 @@
     <header class="page-head upload-page-head">
       <div>
         <div class="eyebrow">Knowledge Ingestion</div>
-        <h1>文档入库</h1>
+        <h1>上传文档</h1>
         <p class="subtitle">选择知识库和文件，系统会自动解析、切块并建立向量索引。</p>
       </div>
       <div class="upload-head-flow" aria-label="入库流程">
@@ -135,9 +135,12 @@
             :status="job.status === 'failed' ? 'exception' : job.status === 'done' ? 'success' : ''"
             :stroke-width="6"
           />
-          <p class="upload-job-message">
-            {{ job.message }}
+          <p class="upload-job-message" :class="{ 'is-failed': job.status === 'failed' }">
+            {{ job.status === 'failed' ? describeIndexError(job.message).title : job.message }}
             <span v-if="job.chunks"> · {{ job.chunks }} 个文本块</span>
+          </p>
+          <p v-if="job.status === 'failed'" class="upload-job-hint">
+            {{ describeIndexError(job.message).hint }}
           </p>
           <el-button
             v-if="job.status === 'failed' && job.job_id"
@@ -181,7 +184,9 @@
               >重新索引</el-button>
               <button v-if="j.job_id" class="recent-open" type="button" @click="openJob(j.job_id)">查看</button>
             </div>
-            <div v-if="j.message" class="muted recent-msg">{{ j.message }}</div>
+            <div v-if="j.message" class="muted recent-msg">
+              {{ j.status === 'failed' ? describeIndexError(j.message).title : j.message }}
+            </div>
           </div>
         </section>
       </div>
@@ -209,13 +214,15 @@
         <section class="card upload-guide-card">
           <div class="card-title">上传前确认</div>
           <div class="upload-format-tags">
-            <span v-for="ext in allowedExtensions.slice(0, 7)" :key="ext">{{ ext.toUpperCase() }}</span>
+            <!-- 不截断：格式列表来自服务端，按字母序截前 7 个会把 PDF 挤掉，
+                 而 PDF 恰恰是最常上传的格式。 -->
+            <span v-for="ext in allowedExtensions" :key="ext">{{ ext.toUpperCase() }}</span>
           </div>
           <ul class="upload-check-list">
             <li>单个文件不超过 {{ maxMB }} MB</li>
             <li>优先上传可复制文字的 PDF，扫描件需要 OCR</li>
             <li>同名文件重新上传会覆盖旧版本</li>
-            <li>1800 字切块、240 字重叠</li>
+            <li>{{ chunkSize }} 字切块、{{ chunkOverlap }} 字重叠</li>
           </ul>
         </section>
       </aside>
@@ -229,6 +236,7 @@ import { useRoute } from 'vue-router'
 import axios from 'axios'
 import { genFileId } from 'element-plus'
 import { jobPhaseLabel, jobStageState } from '../jobPhase'
+import { describeIndexError } from '../utils/indexError'
 
 interface Unit {
   unit_id: string
@@ -247,9 +255,13 @@ interface Job {
   created_at?: string
 }
 
-// 与后端 MAX_UPLOAD_MB 保持一致（后端最终以环境变量为准）。
-const maxMB = 50
-const allowedExtensions = ['txt', 'md', 'markdown', 'json', 'html', 'htm', 'csv', 'docx', 'pdf']
+// 上传与切块的真实限制由服务端下发（GET /api/v1/ingest/config）。
+// 这里保留一份兜底值，仅在接口不可用时使用；不要在页面文案里再写死一份，
+// 否则改配置后界面会承诺服务端并不支持的数字。
+const maxMB = ref(50)
+const chunkSize = ref(1800)
+const chunkOverlap = ref(240)
+const allowedExtensions = ref(['txt', 'md', 'markdown', 'json', 'html', 'htm', 'csv', 'docx', 'pdf'])
 const types = ['制度', '预案', '检测报告', '台账', '其他']
 
 const route = useRoute()
@@ -357,8 +369,23 @@ async function loadUnits() {
   }
 }
 
+// 读取服务端的真实限制；失败时保留兜底值，不让页面因此不可用。
+async function loadIngestConfig() {
+  try {
+    const { data } = await axios.get('/api/v1/ingest/config')
+    if (data.max_upload_mb) maxMB.value = data.max_upload_mb
+    if (data.chunk_size) chunkSize.value = data.chunk_size
+    if (data.chunk_overlap) chunkOverlap.value = data.chunk_overlap
+    if (Array.isArray(data.extensions) && data.extensions.length) {
+      allowedExtensions.value = data.extensions
+    }
+  } catch {
+    // 接口不可用就用兜底值，静默降级。
+  }
+}
+
 onMounted(async () => {
-  await loadUnits()
+  await Promise.all([loadUnits(), loadIngestConfig()])
   const queryUnit = route.query.unit
   if (queryUnit) unit.value = String(queryUnit)
   await loadRecent()
@@ -399,14 +426,14 @@ function fileChanged(f: any) {
   const name: string = f.name || ''
   const ext = (name.split('.').pop() || '').toLowerCase()
   fileError.value = ''
-  if (!allowedExtensions.includes(ext)) {
+  if (!allowedExtensions.value.includes(ext)) {
     fileError.value = `不支持的文件类型：${ext ? '.' + ext : '未知'}`
     clearFile()
     uploader.value?.clearFiles()
     return
   }
-  if (f.size && f.size > maxMB * 1024 * 1024) {
-    fileError.value = `文件超过 ${maxMB} MB 上限`
+  if (f.size && f.size > maxMB.value * 1024 * 1024) {
+    fileError.value = `文件超过 ${maxMB.value} MB 上限`
     clearFile()
     uploader.value?.clearFiles()
     return
@@ -524,7 +551,7 @@ function resetJob() {
   border-radius: 999px;
   background: var(--surface);
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: calc(11px * var(--fs-scale));
 }
 
 .upload-head-flow span {
@@ -541,7 +568,7 @@ function resetJob() {
   border-radius: 50%;
   background: var(--bg-subtle);
   color: var(--text-secondary);
-  font-size: 9px;
+  font-size: calc(9px * var(--fs-scale));
   font-style: normal;
   font-weight: 700;
 }
@@ -589,14 +616,14 @@ function resetJob() {
 
 .upload-card-heading .card-title {
   margin: 0;
-  font-size: 15px;
+  font-size: calc(15px * var(--fs-scale));
 }
 
 .upload-card-heading p,
 .upload-guide-intro {
   margin: 5px 0 0;
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs-scale));
   line-height: 1.6;
 }
 
@@ -606,7 +633,7 @@ function resetJob() {
   border-radius: 999px;
   background: var(--bg-subtle);
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: calc(11px * var(--fs-scale));
 }
 
 .upload-form-card :deep(.el-form) {
@@ -627,7 +654,7 @@ function resetJob() {
   align-items: center;
   gap: 7px;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs-scale));
   font-weight: 600;
 }
 
@@ -639,7 +666,7 @@ function resetJob() {
   border-radius: 6px;
   background: var(--accent-soft);
   color: var(--accent);
-  font-size: 9px;
+  font-size: calc(9px * var(--fs-scale));
   font-style: normal;
   font-weight: 700;
 }
@@ -681,19 +708,19 @@ function resetJob() {
 
 .upload-zone-content strong {
   color: var(--text);
-  font-size: 14px;
+  font-size: calc(14px * var(--fs-scale));
   font-weight: 620;
 }
 
 .upload-zone-content span {
   margin-top: 3px;
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs-scale));
 }
 
 .upload-zone-content em {
   color: var(--text-muted);
-  font-size: 10px;
+  font-size: calc(10px * var(--fs-scale));
   font-style: normal;
 }
 
@@ -717,7 +744,7 @@ function resetJob() {
   border-radius: 9px;
   background: var(--surface);
   color: var(--accent);
-  font-size: 9px;
+  font-size: calc(9px * var(--fs-scale));
   font-weight: 750;
   letter-spacing: 0.04em;
 }
@@ -733,7 +760,7 @@ function resetJob() {
 .selected-file-main b {
   overflow: hidden;
   color: var(--text);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs-scale));
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -741,7 +768,7 @@ function resetJob() {
 
 .selected-file-main span {
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: calc(11px * var(--fs-scale));
 }
 
 .selected-file button {
@@ -750,7 +777,7 @@ function resetJob() {
   border-radius: 7px;
   background: transparent;
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: calc(11px * var(--fs-scale));
   cursor: pointer;
 }
 
@@ -779,14 +806,14 @@ function resetJob() {
 
 .upload-submit-bar b {
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs-scale));
   font-weight: 600;
 }
 
 .upload-submit-bar span {
   overflow: hidden;
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: calc(11px * var(--fs-scale));
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -810,7 +837,7 @@ function resetJob() {
 .upload-job-message {
   margin: 10px 0 0;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs-scale));
   line-height: 1.6;
 }
 
@@ -820,7 +847,7 @@ function resetJob() {
 
 .upload-guide-card .card-title {
   margin-bottom: 6px;
-  font-size: 14px;
+  font-size: calc(14px * var(--fs-scale));
 }
 
 .upload-flow-list {
@@ -859,21 +886,21 @@ function resetJob() {
   border-radius: 50%;
   background: var(--surface);
   color: var(--text-secondary);
-  font-size: 10px;
+  font-size: calc(10px * var(--fs-scale));
   font-weight: 700;
 }
 
 .upload-flow-list b {
   display: block;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs-scale));
   font-weight: 600;
 }
 
 .upload-flow-list p {
   margin: 3px 0 0;
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: calc(11px * var(--fs-scale));
   line-height: 1.55;
 }
 
@@ -890,7 +917,7 @@ function resetJob() {
   border-radius: 6px;
   background: var(--bg-subtle);
   color: var(--text-secondary);
-  font-size: 9px;
+  font-size: calc(9px * var(--fs-scale));
   font-weight: 650;
   letter-spacing: 0.03em;
 }
@@ -907,7 +934,7 @@ function resetJob() {
   position: relative;
   padding-left: 15px;
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: calc(11px * var(--fs-scale));
   line-height: 1.6;
 }
 
@@ -946,7 +973,7 @@ function resetJob() {
   white-space: nowrap;
 }
 .recent-main .muted {
-  font-size: 12px;
+  font-size: calc(12px * var(--fs-scale));
 }
 .recent-side {
   display: flex;
@@ -960,7 +987,7 @@ function resetJob() {
   border-radius: 6px;
   background: transparent;
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: calc(11px * var(--fs-scale));
   cursor: pointer;
 }
 .recent-open:hover {
@@ -969,7 +996,7 @@ function resetJob() {
 }
 .recent-msg {
   flex: 1 1 100%;
-  font-size: 12px;
+  font-size: calc(12px * var(--fs-scale));
 }
 
 @media (max-width: 1080px) {

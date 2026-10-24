@@ -1,13 +1,11 @@
 <template>
-  <div class="page unit-list-page">
-    <header class="page-head unit-list-head">
-      <div>
+  <div class="page kb-page">
+    <header class="page-head kb-page-head">
+      <div class="kb-head-copy">
         <div class="eyebrow">Knowledge Bases</div>
         <h1>知识库</h1>
-        <p class="subtitle">{{ loading ? '正在加载…' : summary }}</p>
       </div>
       <div class="head-actions">
-        <el-button :loading="loading" @click="load">刷新</el-button>
         <el-button @click="$router.push('/upload')">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V5m0 0L8 9m4-4 4 4M5 15v3a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-3" /></svg>
           上传文档
@@ -21,121 +19,140 @@
 
     <div v-if="error" class="notice error">{{ error }}</div>
 
-    <section class="unit-overview">
-      <div class="unit-overview-copy">
-        <span>KNOWLEDGE AT A GLANCE</span>
-        <h2>知识资产概览</h2>
-        <p>{{ summary }}</p>
-        <div class="unit-overview-status">
-          <span><i class="ready"></i>{{ readyCount }} 个已有内容</span>
-          <span><i :class="{ warn: emptyCount > 0 }"></i>{{ emptyCount }} 个待补充文档</span>
-        </div>
-      </div>
-      <div class="unit-overview-metrics">
-        <div>
-          <span class="overview-metric-icon docs">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3h7l4 4v14H7zM14 3v5h5" /></svg>
-          </span>
-          <div><b>{{ totalDocs }}</b><span>文档</span></div>
-        </div>
-        <div>
-          <span class="overview-metric-icon chunks">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M5 6h14M5 12h14M5 18h9" /></svg>
-          </span>
-          <div><b>{{ totalChunks }}</b><span>文本块</span></div>
-        </div>
-        <div>
-          <span class="overview-metric-icon agents">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 7v5c0 4.4 3.4 7.5 8 9 4.6-1.5 8-4.6 8-9V7l-8-4Z" /><path d="m9 12 2 2 4-4" /></svg>
-          </span>
-          <div><b>{{ configuredCount }}</b><span>自定义 Agent</span></div>
-        </div>
-      </div>
-    </section>
-
-    <div class="panel unit-list-panel">
-      <div class="unit-list-toolbar">
-        <div class="unit-filter-controls">
-          <el-input v-model="keyword" class="search-input unit-search" clearable placeholder="搜索名称、分类、行业或标签">
+    <!-- 主从布局：左边选库，右边立刻看到这个库讲了什么、能问什么。
+         原来是等权重卡片墙，四个库长得一样，谁也没有重点；现在任何时候
+         只有一个「当前库」，信息也就有了落点。 -->
+    <div class="kb-layout">
+      <aside class="kb-rail">
+        <div class="kb-rail-search">
+          <el-input v-model="keyword" size="small" clearable placeholder="搜索名称或内容">
             <template #prefix>
-              <svg class="unit-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="7" /><path d="m16.5 16.5 4 4" /></svg>
+              <svg class="kb-rail-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="7" /><path d="m16.5 16.5 4 4" /></svg>
             </template>
           </el-input>
-          <el-select v-model="typeFilter" clearable placeholder="全部分类" class="unit-type-filter">
-            <el-option v-for="type in typeOptions" :key="type" :label="type" :value="type" />
-          </el-select>
-          <el-radio-group v-model="statusFilter" size="small" class="unit-status-filter">
-            <el-radio-button value="all">全部</el-radio-button>
-            <el-radio-button value="ready">已有内容</el-radio-button>
-            <el-radio-button value="empty">待补充</el-radio-button>
-          </el-radio-group>
         </div>
-        <span class="unit-result-count">{{ keyword || typeFilter || statusFilter !== 'all' ? `${filtered.length} 个匹配结果` : `共 ${units.length} 个知识库` }}</span>
-      </div>
-      <div class="unit-card-grid" v-loading="loading">
-        <article v-for="unit in filtered" :key="unit.unit_id" class="unit-card" :class="{ empty: !unit.document_count }">
-          <router-link :to="`/units/${unit.unit_id}`" class="unit-card-main">
-            <div class="unit-card-heading">
-              <div class="unit-card-identity">
-                <span class="unit-card-avatar">{{ unitInitial(unit.name) }}</span>
-                <div class="unit-card-title-wrap">
-                  <span class="unit-card-category">{{ unit.unit_type || '未分类' }}<template v-if="unit.industry"> · {{ unit.industry }}</template></span>
-                  <h2 class="unit-card-title">{{ unit.name }}</h2>
-                  <span class="unit-card-id">{{ unit.unit_id }}</span>
-                </div>
-              </div>
-              <span class="unit-card-arrow" aria-hidden="true">↗</span>
-            </div>
 
-            <div class="unit-health-row">
-              <span class="unit-health" :class="{ empty: !unit.document_count }"><i></i>{{ unit.document_count ? '已就绪' : '待补充文档' }}</span>
-              <span>最近活动 {{ relativeTime(unit.last_indexed_at) }}</span>
-            </div>
+        <div class="kb-rail-list" v-loading="loading">
+          <button
+            v-for="u in filtered"
+            :key="u.unit_id"
+            type="button"
+            class="kb-rail-item"
+            :class="{ active: u.unit_id === selectedId }"
+            @click="selectedId = u.unit_id"
+          >
+            <span class="kb-rail-initial">{{ unitInitial(u.name) }}</span>
+            <span class="kb-rail-body">
+              <span class="kb-rail-name">{{ u.name }}</span>
+              <span class="kb-rail-meta">
+                <template v-if="u.chapter_count">{{ u.chapter_count }} 章节 · </template>{{ u.document_count || 0 }} 份文档
+              </span>
+              <!-- 库与库的区别在「覆盖什么」，不在「有几份文件」。
+                   清单里先露两个章节名，扫一眼就知道这个库讲哪块业务。 -->
+              <span v-if="u.chapters?.length" class="kb-rail-topics">{{ u.chapters.slice(0, 2).join(' · ') }}</span>
+            </span>
+          </button>
 
-            <div class="unit-card-metrics">
-              <div><b>{{ unit.document_count ?? 0 }}</b><span>文档</span></div>
-              <div><b>{{ unit.chunk_count ?? 0 }}</b><span>文本块</span></div>
-              <div><b>{{ unit.doc_types?.length || 0 }}</b><span>文档类型</span></div>
-            </div>
+          <p v-if="!loading && !filtered.length" class="kb-rail-empty">
+            {{ keyword ? '没有匹配的知识库' : '还没有知识库' }}
+          </p>
+        </div>
+      </aside>
 
-            <div v-if="unit.doc_types?.length" class="unit-card-types">
-              <el-tag v-for="t in unit.doc_types.slice(0, 4)" :key="t" size="small" effect="plain" type="info">{{ t }}</el-tag>
-              <span v-if="unit.doc_types.length > 4" class="muted">+{{ unit.doc_types.length - 4 }}</span>
-            </div>
-
-            <div class="unit-card-config">
-              <div class="unit-card-agent">
-                <span class="unit-card-label">默认 Agent</span>
-                <b>{{ expertName(unit.expert_id) }}</b>
-              </div>
-              <div class="unit-card-counts">
-                <span>{{ unit.skill_ids?.length || 0 }} 项默认技能</span>
-                <span>{{ unit.tool_names?.length ? `${unit.tool_names.length} 项指定工具` : '工具自动匹配' }}</span>
-              </div>
-            </div>
-          </router-link>
-
-          <div class="unit-card-bottom">
-            <div class="unit-card-tags">
-              <el-tag v-for="tag in (unit.tags || []).slice(0, 3)" :key="tag" size="small" effect="plain">{{ tag }}</el-tag>
-              <span v-if="!unit.tags?.length" class="muted">暂无标签</span>
-              <span v-else-if="unit.tags.length > 3" class="muted">+{{ unit.tags.length - 3 }}</span>
-            </div>
-            <div class="unit-card-actions">
-              <button type="button" class="unit-quick-action primary" @click="chatWithUnit(unit)">去对话</button>
-              <button type="button" class="unit-quick-action" @click="uploadToUnit(unit)">{{ unit.document_count ? '上传' : '添加文档' }}</button>
-              <button type="button" class="unit-quick-action" @click="openEdit(unit)">编辑</button>
+      <section v-if="current" class="kb-stage">
+        <header class="kb-stage-head">
+          <div class="kb-stage-title">
+            <h2>{{ current.name }}</h2>
+            <div class="kb-stage-meta">
+              <span v-if="current.unit_type" class="kb-meta-strong">{{ current.unit_type }}</span>
+              <span v-if="current.industry">{{ current.industry }}</span>
+              <span>{{ current.document_count || 0 }} 份文档</span>
+              <span>{{ current.chapter_count || 0 }} 个章节</span>
+              <span>{{ current.chunk_count || 0 }} 个片段</span>
             </div>
           </div>
-        </article>
+          <div class="kb-stage-actions">
+            <el-button size="small" text @click="openEdit(current)">设置</el-button>
+            <el-button size="small" @click="uploadToUnit(current)">上传</el-button>
+            <el-button size="small" type="primary" @click="chatWithUnit(current)">开始对话</el-button>
+          </div>
+        </header>
 
-        <div v-if="!loading && !filtered.length" class="unit-empty muted">
-          <b>{{ keyword || typeFilter || statusFilter !== 'all' ? '没有匹配的知识库' : '还没有知识库' }}</b>
-          <span>{{ keyword || typeFilter || statusFilter !== 'all' ? '调整搜索或筛选条件后再试。' : '新建知识库，或先上传文档。' }}</span>
-          <el-button v-if="keyword || typeFilter || statusFilter !== 'all'" @click="clearFilters">清空筛选</el-button>
-          <el-button v-else type="primary" @click="openCreate">新建知识库</el-button>
-        </div>
-      </div>
+        <!-- 能问什么：这是整个页面的重点。问题由章节生成、并且已经在
+             当前参数下真实检索验证过，点了答得上来才不会伤信任。 -->
+        <section class="kb-block kb-block-questions">
+          <div class="kb-block-head">
+            <h3>能问什么</h3>
+            <span class="kb-block-hint">已在本库检索验证</span>
+          </div>
+
+          <div v-if="loadingDetail" class="kb-skeleton">
+            <span v-for="i in 3" :key="i" class="kb-skeleton-row"></span>
+          </div>
+          <ol v-else-if="examples.length" class="kb-questions">
+            <li v-for="(q, i) in examples" :key="q.question">
+              <button type="button" class="kb-question" @click="askQuestion(q.question)">
+                <span class="q-index">{{ String(i + 1).padStart(2, '0') }}</span>
+                <span class="q-text">{{ q.question }}</span>
+                <span class="q-source">{{ i === 0 || q.doc_name !== examples[i - 1].doc_name ? q.doc_name : '' }}</span>
+                <span class="q-go" aria-hidden="true">→</span>
+              </button>
+            </li>
+          </ol>
+          <div v-else class="kb-block-empty">
+            <template v-if="current.document_count">
+              章节结构不明显，这个问题暂时生成不出来；内容仍可直接提问。
+            </template>
+            <template v-else>
+              这个库还是空的。先上传文档，再回来看能问什么。
+            </template>
+          </div>
+        </section>
+
+        <section v-if="chapters.length" class="kb-block">
+          <div class="kb-block-head">
+            <h3>内容框架</h3>
+            <router-link class="kb-block-link" :to="`/units/${current.unit_id}/outline`">
+              打开完整目录 →
+            </router-link>
+          </div>
+          <div class="kb-chapters">
+            <button
+              v-for="c in chapters"
+              :key="c.doc_id + c.title"
+              type="button"
+              class="kb-chapter"
+              :class="{ major: c.level === 1 }"
+              :title="`就「${c.title}」提问`"
+              @click="askChapter(c.title)"
+            >{{ c.title }}</button>
+          </div>
+        </section>
+
+        <section class="kb-block">
+          <div class="kb-block-head">
+            <h3>文档</h3>
+            <span class="kb-block-hint">{{ current.document_count || 0 }} 份</span>
+          </div>
+          <ul v-if="documents.length" class="kb-docs">
+            <li v-for="d in documents" :key="d.doc_id">
+              <router-link :to="`/units/${current.unit_id}`" class="kb-doc">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3h7l4 4v14H7zM14 3v5h5" /></svg>
+                <span class="kb-doc-name">{{ d.filename }}</span>
+                <span class="kb-doc-meta">{{ d.doc_type || '文档' }} · {{ d.chunk_count }} 个片段</span>
+              </router-link>
+            </li>
+          </ul>
+          <div v-else class="kb-block-empty">
+            还没有文档。
+            <button type="button" class="kb-inline-btn" @click="uploadToUnit(current)">上传第一份文档</button>
+          </div>
+        </section>
+      </section>
+
+      <section v-else class="kb-stage kb-stage-placeholder">
+        <p>{{ loading ? '正在读取知识库…' : '选择左侧的知识库，查看它讲了什么、能问什么。' }}</p>
+      </section>
     </div>
 
     <el-dialog
@@ -206,7 +223,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import axios from 'axios'
 import { ElMessage } from 'element-plus'
 import { useRouter } from 'vue-router'
@@ -218,12 +235,34 @@ interface Unit {
   industry: string
   document_count?: number
   chunk_count?: number
+  chapter_count?: number
+  chapters?: string[]
+  doc_names?: string[]
   last_indexed_at?: string | null
   doc_types?: string[]
   expert_id?: string
   skill_ids?: string[]
   tool_names?: string[]
   tags?: string[]
+}
+
+interface Chapter {
+  title: string
+  level: number
+  doc_id: string
+}
+
+interface Question {
+  question: string
+  source?: string
+  doc_name?: string
+}
+
+interface DocRow {
+  doc_id: string
+  filename: string
+  doc_type: string
+  chunk_count: number
 }
 
 interface AgentOption {
@@ -241,26 +280,25 @@ const agentTools = [
 const units = ref<Unit[]>([])
 const router = useRouter()
 
-function relativeTime(value?: string | null) {
-  if (!value) return '未索引'
-  const diff = Date.now() - new Date(value).getTime()
-  if (Number.isNaN(diff)) return '—'
-  if (diff < 60_000) return '刚刚'
-  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前`
-  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前`
-  if (diff < 30 * 86_400_000) return `${Math.floor(diff / 86_400_000)} 天前`
-  return new Date(value).toLocaleDateString()
-}
-const experts = ref<AgentOption[]>([])
-const skills = ref<AgentOption[]>([])
+// 选中态就是「当前重点」。默认落在第一个有内容的库上，
+// 而不是某个空库——打开页面先看到内容比先看到空状态有用。
+const selectedId = ref('')
+const keyword = ref('')
 const loading = ref(false)
+const loadingDetail = ref(false)
 const saving = ref(false)
 const error = ref('')
-const keyword = ref('')
-const typeFilter = ref('')
-const statusFilter = ref<'all' | 'ready' | 'empty'>('all')
 const categories = ref<string[]>([])
 const industries = ref<string[]>([])
+const experts = ref<AgentOption[]>([])
+const skills = ref<AgentOption[]>([])
+
+const examples = ref<Question[]>([])
+const chapters = ref<Chapter[]>([])
+const documents = ref<DocRow[]>([])
+
+// 切库再切回来不必重新请求：右侧内容在会话期内不会变。
+const detailCache = new Map<string, { examples: Question[]; chapters: Chapter[]; documents: DocRow[] }>()
 
 const dialog = ref(false)
 const editing = ref<Unit | null>(null)
@@ -275,71 +313,107 @@ const form = ref({
 })
 
 const tagOptions = computed(() => [...new Set(units.value.flatMap((u) => u.tags || []))])
-const typeOptions = computed(() => [...new Set(units.value.map((u) => u.unit_type).filter(Boolean))].sort())
-const totalDocs = computed(() => units.value.reduce((sum, u) => sum + (u.document_count || 0), 0))
-const totalChunks = computed(() => units.value.reduce((sum, u) => sum + (u.chunk_count || 0), 0))
-const readyCount = computed(() => units.value.filter((u) => (u.document_count || 0) > 0).length)
-const emptyCount = computed(() => units.value.length - readyCount.value)
-const configuredCount = computed(() => units.value.filter((u) => !!u.expert_id).length)
 
 const filtered = computed(() => {
   const key = keyword.value.trim().toLowerCase()
-  return units.value.filter((u) => {
-    const matchesKey = !key ||
-      u.name.toLowerCase().includes(key) ||
-      u.unit_id.toLowerCase().includes(key) ||
-      (u.unit_type || '').toLowerCase().includes(key) ||
-      (u.industry || '').toLowerCase().includes(key) ||
-      (u.tags || []).some((tag) => tag.toLowerCase().includes(key))
-    const matchesType = !typeFilter.value || u.unit_type === typeFilter.value
-    const matchesStatus =
-      statusFilter.value === 'all' ||
-      (statusFilter.value === 'ready' && (u.document_count || 0) > 0) ||
-      (statusFilter.value === 'empty' && (u.document_count || 0) === 0)
-    return matchesKey && matchesType && matchesStatus
-  })
+  if (!key) return units.value
+  return units.value.filter((u) =>
+    u.name.toLowerCase().includes(key) ||
+    (u.unit_type || '').toLowerCase().includes(key) ||
+    (u.industry || '').toLowerCase().includes(key) ||
+    (u.chapters || []).some((c) => c.toLowerCase().includes(key)) ||
+    (u.doc_names || []).some((d) => d.toLowerCase().includes(key)) ||
+    (u.tags || []).some((tag) => tag.toLowerCase().includes(key)),
+  )
 })
 
-const summary = computed(() => {
-  const docTotal = units.value.reduce((sum, u) => sum + (u.document_count || 0), 0)
-  const chunkTotal = units.value.reduce((sum, u) => sum + (u.chunk_count || 0), 0)
-  const scope = keyword.value ? `匹配 ${filtered.value.length} 个` : `共 ${units.value.length} 个`
-  return `${scope}知识库 · ${docTotal} 份文档 · ${chunkTotal} 个文本块`
-})
-
-function expertName(id?: string) {
-  if (!id) return '默认'
-  return experts.value.find((e) => e.id === id)?.name || id
-}
+const current = computed(() => units.value.find((u) => u.unit_id === selectedId.value) || null)
 
 function unitInitial(name: string) {
   return Array.from(name.trim())[0] || '知'
-}
-
-function clearFilters() {
-  keyword.value = ''
-  typeFilter.value = ''
-  statusFilter.value = 'all'
 }
 
 function chatWithUnit(unit: Unit) {
   router.push({ path: '/agent', query: { unit: unit.unit_id } })
 }
 
+// 点问题直接进对话并自动发出，中间不再需要用户复制粘贴。
+function askQuestion(question: string) {
+  if (!current.value) return
+  router.push({ path: '/agent', query: { unit: current.value.unit_id, q: question } })
+}
+
+// 章节用「」而不是《》：章节不是文件，套书名号会让模型先否认「没有这份文档」。
+function askChapter(title: string) {
+  askQuestion(`「${title}」主要讲了什么？`)
+}
+
 function uploadToUnit(unit: Unit) {
   router.push({ path: '/upload', query: { unit: unit.unit_id } })
 }
+
+async function loadDetail(unit: Unit) {
+  const cached = detailCache.get(unit.unit_id)
+  if (cached) {
+    examples.value = cached.examples
+    chapters.value = cached.chapters
+    documents.value = cached.documents
+    return
+  }
+  loadingDetail.value = true
+  examples.value = []
+  chapters.value = []
+  documents.value = []
+  try {
+    const [ex, outline, docs] = await Promise.all([
+      axios.get(`/api/v1/units/${unit.unit_id}/examples`, { params: { limit: 4 }, timeout: 40000 }),
+      axios.get(`/api/v1/units/${unit.unit_id}/outline`),
+      axios.get(`/api/v1/units/${unit.unit_id}/documents`),
+    ])
+    const allChapters: Chapter[] = (outline.data.documents || [])
+      .flatMap((d: any) => (d.entries || []).map((e: any) => ({ ...e, doc_id: d.doc_id })))
+    // 这里只是「框架速览」，只放章级标题；条级留给完整目录，混在一起
+    // 会让人分不清哪是章、哪是条。没有章级结构时再退回全部条目。
+    const majors = allChapters.filter((e) => e.level === 1)
+    const chapterList: Chapter[] = (majors.length ? majors : allChapters)
+      .sort((a: Chapter, b: Chapter) => a.level - b.level)
+      .slice(0, 16)
+    examples.value = ex.data.questions || []
+    chapters.value = chapterList
+    documents.value = (docs.data || []).slice(0, 4)
+    detailCache.set(unit.unit_id, {
+      examples: examples.value,
+      chapters: chapters.value,
+      documents: documents.value,
+    })
+  } catch {
+    examples.value = []
+    chapters.value = []
+    documents.value = []
+  } finally {
+    loadingDetail.value = false
+  }
+}
+
+watch(current, (unit) => {
+  if (unit) loadDetail(unit)
+})
 
 async function load() {
   loading.value = true
   error.value = ''
   try {
     units.value = (await axios.get('/api/v1/units')).data
+    const exists = units.value.some((u) => u.unit_id === selectedId.value)
+    if (!exists) {
+      const first = units.value.find((u) => (u.document_count || 0) > 0) || units.value[0]
+      selectedId.value = first?.unit_id || ''
+    }
   } catch (e: any) {
     units.value = []
     error.value = e.response?.status === 503
-      ? '数据库未配置，无法读取项目列表。'
-      : e.response?.data?.error || '读取项目列表失败，请确认服务可用。'
+      ? '数据库未配置，无法读取知识库列表。'
+      : e.response?.data?.error || '读取知识库列表失败，请确认服务可用。'
   } finally {
     loading.value = false
   }
@@ -356,7 +430,7 @@ async function loadMeta() {
     experts.value = cfg.data.experts || []
     skills.value = cfg.data.skills || []
   } catch {
-    // 建议项加载失败不影响项目管理。
+    // meta 加载失败不影响主体内容。
   }
 }
 
@@ -383,7 +457,7 @@ function openEdit(row: Unit) {
 async function save() {
   const name = form.value.name.trim()
   if (!name) {
-    ElMessage.warning('请填写项目名称')
+    ElMessage.warning('请填写知识库名称')
     return
   }
   saving.value = true
@@ -399,11 +473,13 @@ async function save() {
     }
     if (editing.value) {
       await axios.patch(`/api/v1/units/${editing.value.unit_id}`, payload)
-      ElMessage.success('项目已更新')
+      ElMessage.success('知识库已更新')
     } else {
-      await axios.post('/api/v1/units', payload)
-      ElMessage.success('项目已创建')
+      const { data } = await axios.post('/api/v1/units', payload)
+      ElMessage.success('知识库已创建')
+      if (data?.unit_id) selectedId.value = data.unit_id
     }
+    detailCache.clear()
     dialog.value = false
     await Promise.all([load(), loadMeta()])
   } catch (e: any) {
@@ -420,495 +496,425 @@ onMounted(() => {
 </script>
 
 <style scoped>
-.unit-list-page {
-  max-width: 1220px;
+.kb-page {
+  max-width: 1240px;
 }
 
-.unit-list-head {
+.kb-page-head {
   align-items: flex-end;
+  margin-bottom: 18px;
 }
 
-.unit-list-head .head-actions :deep(.el-button svg) {
+.kb-head-copy h1 {
+  margin: 2px 0 0;
+}
+
+.kb-page-head .head-actions :deep(.el-button svg) {
   width: 14px;
   height: 14px;
   margin-right: 4px;
 }
 
-.unit-overview {
+.kb-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 24px;
-  position: relative;
-  overflow: hidden;
-  margin-bottom: 16px;
-  padding: 22px 24px;
-  border: 1px solid color-mix(in srgb, var(--accent) 16%, var(--border));
-  border-radius: 18px;
-  background:
-    radial-gradient(circle at 88% 20%, color-mix(in srgb, var(--accent) 12%, transparent) 0, transparent 35%),
-    linear-gradient(135deg, var(--surface), color-mix(in srgb, var(--accent) 4%, var(--bg-subtle)));
+  grid-template-columns: 250px minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
 }
 
-.unit-overview-copy {
-  max-width: 540px;
-}
-
-.unit-overview-copy > span {
-  color: var(--accent);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.12em;
-}
-
-.unit-overview-copy h2 {
-  margin: 7px 0 5px;
-  color: var(--text);
-  font-size: 20px;
-  font-weight: 650;
-  letter-spacing: -0.02em;
-}
-
-.unit-overview-copy p {
-  margin: 0;
-  color: var(--text-secondary);
-  font-size: 12px;
-  line-height: 1.65;
-}
-
-.unit-overview-status {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 16px;
-  margin-top: 13px;
-  color: var(--text-muted);
-  font-size: 11px;
-}
-
-.unit-overview-status span {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.unit-overview-status i {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--accent);
-}
-
-.unit-overview-status i.warn {
-  background: #d97706;
-}
-
-.unit-overview-metrics {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(112px, 1fr));
-  gap: 8px;
-}
-
-.unit-overview-metrics > div {
-  display: flex;
-  min-width: 112px;
-  align-items: center;
-  gap: 10px;
-  padding: 12px 13px;
-  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--surface) 90%, transparent);
-  backdrop-filter: blur(4px);
-}
-
-.overview-metric-icon {
-  display: grid;
-  width: 31px;
-  height: 31px;
-  flex: none;
-  place-items: center;
-  border-radius: 9px;
-  background: var(--bg-subtle);
-  color: var(--text-secondary);
-}
-
-.overview-metric-icon svg {
-  width: 16px;
-  height: 16px;
-}
-
-.overview-metric-icon.chunks {
-  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
-  color: var(--accent);
-}
-
-.overview-metric-icon.agents {
-  background: color-mix(in srgb, #6366f1 8%, var(--surface));
-  color: #6366f1;
-}
-
-.unit-overview-metrics > div > div {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-}
-
-.unit-overview-metrics b {
-  color: var(--text);
-  font-size: 18px;
-  font-weight: 680;
-  line-height: 1.2;
-}
-
-.unit-overview-metrics span:not(.overview-metric-icon) {
-  color: var(--text-muted);
-  font-size: 10px;
-  white-space: nowrap;
-}
-
-.unit-list-panel {
+/* ---------------- 左栏：库清单 ---------------- */
+.kb-rail {
+  position: sticky;
+  top: 12px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
   overflow: hidden;
 }
 
-.unit-list-toolbar {
-  align-items: center;
-  gap: 14px;
-  padding: 14px 18px;
-}
-
-.unit-filter-controls {
-  display: flex;
-  min-width: 0;
-  flex: 1;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-}
-
-.unit-search {
-  width: 280px;
-}
-
-.unit-search-icon {
-  width: 14px;
-  height: 14px;
-  color: var(--text-muted);
-}
-
-.unit-type-filter {
-  width: 150px;
-}
-
-.unit-result-count {
-  flex: none;
-  margin-left: auto;
-  color: var(--text-muted);
-  font-size: 11px;
-}
-
-.unit-card-grid {
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr));
-  gap: 14px;
-  padding: 14px;
-}
-
-.unit-card {
-  gap: 0;
-  overflow: hidden;
-  padding: 0;
-  border-radius: 15px;
-}
-
-.unit-card.empty {
-  border-color: color-mix(in srgb, #d97706 16%, var(--border));
-  background: linear-gradient(180deg, color-mix(in srgb, #d97706 2.5%, var(--surface)), var(--surface));
-}
-
-.unit-card-main {
-  gap: 13px;
-  padding: 17px 17px 14px;
-}
-
-.unit-card-heading {
-  gap: 10px;
-}
-
-.unit-card-identity {
-  display: flex;
-  min-width: 0;
-  align-items: flex-start;
-  gap: 11px;
-}
-
-.unit-card-avatar {
-  display: grid;
-  width: 38px;
-  height: 38px;
-  flex: none;
-  place-items: center;
-  border: 1px solid color-mix(in srgb, var(--accent) 15%, var(--border));
-  border-radius: 11px;
-  background: linear-gradient(145deg, var(--accent-soft), var(--surface));
-  color: var(--accent);
-  font-size: 15px;
-  font-weight: 700;
-}
-
-.unit-card-title-wrap {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-}
-
-.unit-card-category {
-  display: block;
-  overflow: hidden;
-  margin-bottom: 3px;
-  color: var(--text-muted);
-  font-size: 9px;
-  font-weight: 600;
-  letter-spacing: 0.05em;
-  text-overflow: ellipsis;
-  text-transform: uppercase;
-  white-space: nowrap;
-}
-
-.unit-card-title {
-  -webkit-line-clamp: 1;
-  font-size: 14px;
-}
-
-.unit-card-id {
-  margin-top: 3px;
-}
-
-.unit-card-arrow {
-  width: 26px;
-  height: 26px;
-}
-
-.unit-health-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  color: var(--text-muted);
-  font-size: 10px;
-}
-
-.unit-health {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  color: var(--text-secondary);
-  font-size: 10px;
-  font-weight: 600;
-}
-
-.unit-health i {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-soft);
-}
-
-.unit-health.empty {
-  color: #b45309;
-}
-
-.unit-health.empty i {
-  background: #d97706;
-  box-shadow: 0 0 0 3px color-mix(in srgb, #d97706 10%, var(--surface));
-}
-
-.unit-card-metrics {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  padding: 10px 0;
-  border-top: 1px solid var(--border);
+.kb-rail-search {
+  padding: 10px 10px 8px;
   border-bottom: 1px solid var(--border);
 }
 
-.unit-card-metrics div {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  gap: 2px;
-  padding: 0 10px;
-  border-left: 1px solid var(--border);
-}
-
-.unit-card-metrics div:first-child {
-  padding-left: 0;
-  border-left: none;
-}
-
-.unit-card-metrics b {
-  color: var(--text);
-  font-size: 17px;
-  font-weight: 650;
-  line-height: 1.2;
-}
-
-.unit-card-metrics span {
+.kb-rail-search-icon {
+  width: 13px;
+  height: 13px;
   color: var(--text-muted);
-  font-size: 9px;
 }
 
-.unit-card-types {
-  min-height: 22px;
-  gap: 5px;
+.kb-rail-list {
+  max-height: calc(100vh - 250px);
+  overflow-y: auto;
+  padding: 6px;
 }
 
-.unit-card-types :deep(.el-tag) {
-  height: 21px;
-  font-size: 10px;
-}
-
-.unit-card-config {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: end;
-  padding: 10px 11px;
-  border: 1px solid var(--border);
+.kb-rail-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 10px;
+  margin-bottom: 2px;
+  border: 0;
   border-radius: 10px;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.14s ease;
+}
+
+.kb-rail-item:hover {
   background: var(--bg-subtle);
 }
 
-.unit-card-agent b {
-  font-size: 11px;
-}
-
-.unit-card-counts {
-  gap: 2px;
-  font-size: 9px;
-}
-
-.unit-card-bottom {
-  gap: 10px;
-  padding: 11px 17px;
-  border-top: 1px solid var(--border);
-  background: color-mix(in srgb, var(--bg-subtle) 70%, var(--surface));
-}
-
-.unit-card-tags {
-  flex: 1;
-}
-
-.unit-card-tags :deep(.el-tag) {
-  height: 21px;
-  font-size: 9px;
-}
-
-.unit-card-actions {
-  display: flex;
-  flex: none;
-  align-items: center;
-  gap: 4px;
-}
-
-.unit-quick-action {
-  padding: 4px 7px;
-  border: 1px solid transparent;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--text-muted);
-  font-size: 10px;
-  cursor: pointer;
-  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
-}
-
-.unit-quick-action:hover {
-  border-color: var(--border);
-  background: var(--surface);
-  color: var(--text);
-}
-
-.unit-quick-action.primary {
-  border-color: color-mix(in srgb, var(--accent) 18%, var(--border));
+.kb-rail-item.active {
   background: var(--accent-soft);
-  color: var(--accent);
+}
+
+.kb-rail-initial {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+  font-size: calc(12px * var(--fs-scale));
   font-weight: 600;
 }
 
-.unit-quick-action.primary:hover {
-  border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
-  background: color-mix(in srgb, var(--accent) 14%, var(--surface));
+.kb-rail-item.active .kb-rail-initial {
+  background: var(--accent);
+  color: #fff;
+}
+
+.kb-rail-body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.kb-rail-name {
+  font-size: calc(13px * var(--fs-scale));
+  font-weight: 500;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.kb-rail-meta {
+  font-size: calc(11px * var(--fs-scale));
+  color: var(--text-muted);
+}
+
+.kb-rail-topics {
+  font-size: calc(11px * var(--fs-scale));
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.kb-rail-empty {
+  padding: 18px 10px;
+  margin: 0;
+  font-size: calc(12px * var(--fs-scale));
+  color: var(--text-muted);
+  text-align: center;
+}
+
+/* ---------------- 右栏：当前库的工作台 ---------------- */
+.kb-stage {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+  padding: 20px 22px 22px;
+}
+
+.kb-stage-placeholder {
+  display: grid;
+  place-items: center;
+  min-height: 320px;
+  color: var(--text-muted);
+  font-size: calc(13px * var(--fs-scale));
+}
+
+.kb-stage-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.kb-stage-title h2 {
+  margin: 0 0 6px;
+  font-size: calc(23px * var(--fs-scale));
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+
+.kb-stage-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 14px;
+  font-size: calc(12px * var(--fs-scale));
+  color: var(--text-muted);
+}
+
+.kb-meta-strong {
+  color: var(--text-secondary);
+}
+
+.kb-stage-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.kb-block {
+  padding-top: 18px;
+}
+
+.kb-block-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.kb-block-head h3 {
+  margin: 0;
+  font-size: calc(13px * var(--fs-scale));
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text);
+}
+
+.kb-block-hint {
+  font-size: calc(11px * var(--fs-scale));
+  color: var(--text-muted);
+}
+
+.kb-block-link {
+  margin-left: auto;
+  font-size: calc(11px * var(--fs-scale));
+  color: var(--text-muted);
+  text-decoration: none;
+}
+
+.kb-block-link:hover {
   color: var(--accent);
 }
 
-@media (max-width: 1080px) {
-  .unit-list-head {
-    align-items: flex-start;
-  }
-
-  .unit-overview {
-    grid-template-columns: 1fr;
-  }
-
-  .unit-overview-metrics {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
-  .unit-overview-metrics > div {
-    min-width: 0;
-  }
+/* 问题清单是首屏重点：一行一问，序号负责扫读，来源负责可信。 */
+.kb-questions {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
 }
 
-@media (max-width: 720px) {
-  .unit-list-head {
-    align-items: flex-start;
-  }
+.kb-questions li + li {
+  border-top: 1px solid var(--border);
+}
 
-  .unit-list-head .head-actions {
-    width: 100%;
-  }
+.kb-question {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 11px 14px;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.14s ease;
+}
 
-  .unit-list-head .head-actions :deep(.el-button) {
-    flex: 1;
-  }
+.kb-question:hover {
+  background: var(--bg-subtle);
+}
 
-  .unit-overview {
-    padding: 18px;
-  }
+.q-index {
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+  font-size: calc(11px * var(--fs-scale));
+  color: var(--text-muted);
+  letter-spacing: 0.04em;
+}
 
-  .unit-overview-metrics {
+.q-text {
+  flex: 1;
+  min-width: 0;
+  font-size: calc(14px * var(--fs-scale));
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.q-source {
+  flex: 0 0 auto;
+  max-width: 220px;
+  font-size: calc(11px * var(--fs-scale));
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.q-go {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  opacity: 0;
+  transition: opacity 0.14s ease, transform 0.14s ease;
+}
+
+.kb-question:hover .q-go {
+  opacity: 1;
+  transform: translateX(2px);
+}
+
+.kb-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.kb-skeleton-row {
+  display: block;
+  height: 38px;
+  border-radius: 8px;
+  background: linear-gradient(90deg, var(--bg-subtle), var(--bg-hover), var(--bg-subtle));
+  background-size: 200% 100%;
+  animation: kb-shimmer 1.2s ease-in-out infinite;
+}
+
+@keyframes kb-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+.kb-chapters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.kb-chapter {
+  max-width: 100%;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  font-size: calc(12px * var(--fs-scale));
+  color: var(--text-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: border-color 0.14s ease, color 0.14s ease;
+}
+
+.kb-chapter:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.kb-chapter.major {
+  border-color: var(--border-strong);
+  color: var(--text);
+  font-weight: 500;
+}
+
+.kb-docs {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.kb-doc {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 2px;
+  border-bottom: 1px dashed var(--border);
+  text-decoration: none;
+}
+
+.kb-docs li:last-child .kb-doc {
+  border-bottom: 0;
+}
+
+.kb-doc svg {
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  color: var(--text-muted);
+}
+
+.kb-doc-name {
+  flex: 1;
+  min-width: 0;
+  font-size: calc(13px * var(--fs-scale));
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.kb-doc:hover .kb-doc-name {
+  color: var(--accent);
+}
+
+.kb-doc-meta {
+  flex: 0 0 auto;
+  font-size: calc(11px * var(--fs-scale));
+  color: var(--text-muted);
+}
+
+.kb-block-empty {
+  padding: 14px;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  font-size: calc(12px * var(--fs-scale));
+  line-height: 1.7;
+  color: var(--text-muted);
+}
+
+.kb-inline-btn {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font-size: calc(12px * var(--fs-scale));
+  cursor: pointer;
+}
+
+@media (max-width: 980px) {
+  .kb-layout {
     grid-template-columns: 1fr;
   }
 
-  .unit-list-toolbar {
-    align-items: stretch;
-    flex-direction: column;
+  .kb-rail {
+    position: static;
   }
 
-  .unit-search,
-  .unit-type-filter {
-    width: 100%;
-  }
-
-  .unit-result-count {
-    margin-left: 0;
-  }
-
-  .unit-status-filter {
-    width: 100%;
-  }
-
-  .unit-status-filter :deep(.el-radio-button) {
-    flex: 1;
-  }
-
-  .unit-status-filter :deep(.el-radio-button__inner) {
-    width: 100%;
-  }
-
-  .unit-card-bottom {
-    align-items: flex-start;
-    flex-direction: column;
-  }
-
-  .unit-card-actions {
-    width: 100%;
-    justify-content: flex-end;
+  .kb-rail-list {
+    max-height: 220px;
   }
 }
 </style>

@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-label="知识库管理">
+  <title>知识库管理</title>
+  <!-- 标签页图标：浏览器里实际只有 16px，三条线在这个尺寸下会糊成一片。
+       这里减到两条线并把线加粗，保证「深色方块里有一条绿」在任何尺寸都能读出。
+       大尺寸场景（侧栏、lockup、应用图标）仍用三线版。 -->
+  <path fill="#171717" d="M1 9a8 8 0 0 1 8-8h12l10 10v12a8 8 0 0 1-8 8H9a8 8 0 0 1-8-8V9Z"/>
+  <path fill="#ffffff" fill-opacity="0.22" d="M21 1 31 11H21V1Z"/>
+  <g fill="none" stroke-linecap="round">
+    <path stroke="#ffffff" stroke-opacity="0.5" stroke-width="2.9" d="M8 11.6h15"/>
+    <path stroke="#10a37f" stroke-width="3.6" d="M8 20.4h16"/>
+  </g>
+</svg>
