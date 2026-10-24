@@ -25,6 +25,39 @@ go run ./cmd/server   # 自动加载项目根目录的 .env，无需 source
 
 服务默认监听 `127.0.0.1:8080`，`/health` 可检查进程状态。可用 `LISTEN_ADDR` 配置监听地址；远程部署应放在受控的 HTTPS 反向代理后。未配置数据库时，health 仍可用，业务 API 返回明确的依赖错误。端口由 `.env` 的 `PORT` 决定（本仓库 `.env` 为 `8081`），前端 Vite 代理目标必须与之相同，否则页面请求会打到别的进程而出现 `API not found`。
 
+## 代码结构
+
+| 目录 | 职责 | 边界 |
+|---|---|---|
+| `internal/rag` | 检索编排：切块、嵌入、多路召回、RRF 融合、重排、证据判定 | 只有接口，不读环境变量、不碰数据库、不打日志 |
+| `internal/agent` | 工具循环与工具目录（`Catalog`）：消息转录、并发执行、步数上限 | 不感知业务查询与向量检索 |
+| `internal/app` | 装配层：HTTP、数据库、模型客户端，把上面两层接起来 | 不写检索排序算法 |
+| `internal/vectorstore` | 向量读写边界（pgvector / Chroma v2） | 不决定检索策略 |
+
+两个扩展点，都只改一处：
+
+- **加一路召回**：在 `internal/app/retrieval.go` 的 `Channels` 里 append 一个 `rag.Channel`。
+  融合走 RRF 只看排名，新增通道不需要重新调权重；单路失败自动降级。
+- **加一个工具**：在 `internal/app/agent_tools.go` 的 `builtinTools` 里加一个元素。
+  白名单、展示顺序、提示词里的工具清单、上传定义校验全部由它派生。
+
+`internal/app` 内部按职责分文件，不是一锅。需要改动时先按下表定位：
+
+| 文件 | 职责 | 依赖数据库 |
+| --- | --- | --- |
+| `app.go` | 装配、路由、启动时的表结构迁移 | 是（迁移） |
+| `retrieval.go` | 把 DB/模型客户端翻译成 `rag` 的接口；检索留痕 | 是 |
+| `keyword_index.go` | `chunk_text` 镜像表与 pg_trgm 召回 | 是 |
+| `memory.go` | 三层记忆：窗口回放、滚动摘要、原子事实与冲突消解 | 是 |
+| `runtime_settings.go` | 检索/切块/记忆参数，DB 优先于环境变量 | 是 |
+| `outline.go` | 章节抽取（规则 v5）与留痕 | 是 |
+| `examples.go` | 用章节生成示例问题，并用真实检索验证 | 是 |
+| `tree.go` | 知识库 → 文档 → 章节 → 片段 的目录树 | 是 |
+| `brand.go` | 名称、图标、外观主题 | 是 |
+| `instance.go` | 数据库/向量库/运行目录 | **否**（故意的，见 `docs/instance-config.md`） |
+
+`documents` 表记录每个文档的 `embedding_model / embedding_dim / chunker`；换模型后未重建索引时，检索直接返回带重建命令的错误，而不是让两套向量静默混算。详见 [`docs/development.md`](docs/development.md)。
+
 ## 配置
 
 embedding 和 chat 都使用 OpenAI-compatible API，可在前端「设置 > 模型服务」填写 base_url、模型和 API Key 并保存（写入 PostgreSQL `model_settings`，立即生效，无需重启）；页面配置优先于 `EMBED_*`/`LLM_*` 环境变量，字段留空时回落到环境变量。BGE-M3 模型维度固定为 1024；更换 embedding 模型时必须重建全部索引。结构化业务数据始终存入 PostgreSQL；向量读写经 `internal/vectorstore.Store` 组件接口，`VECTOR_STORE=pgvector` 使用 PostgreSQL pgvector，`VECTOR_STORE=chroma` 使用 Chroma v2 REST adapter，均不需改上传和 Agent handler。服务同时提供 MCP Streamable HTTP endpoint `/mcp`，可供 WorkBuddy 或其他 MCP host 调用项目、隐患、审核和向量检索工具。远程使用时必须配置强随机 `MCP_AUTH_TOKEN` 并通过 HTTPS 暴露。WorkBuddy connector 包位于 `workbuddy/knowledge-base-connector/`，包含 connector metadata、MCP config、token 表单、图标和 Skill。
@@ -76,12 +109,21 @@ pnpm build       # vue-tsc -b + vite build
 
 ## 设置页
 
-侧栏底部只有一个「设置」入口，分类导航在设置页**内部**（左侧分栏，窄屏自动变横向）：
+侧栏底部只有一个「设置」入口，分类导航在设置页**内部**（左侧分栏，窄屏自动变横向）。导航按「越是日常越靠上、越是底层越靠下」分组：
 
-| 分类 | 路由 | 用途 |
-| --- | --- | --- |
-| 模型服务 | `/settings/models` | Embedding 与对话模型 |
-| 联网搜索 | `/settings/web-search` | 搜索服务、站点范围、缓存限制 |
-| Agent 与技能 | `/settings/agents` | 上传与管理 Agent、技能定义 |
+| 分组 | 分类 | 路由 | 用途 | 生效 |
+| --- | --- | --- | --- | --- |
+| 外观 | 系统外观 | `/settings/brand` | 项目名称、副标题、图标、7 套配色、3 档圆角 | 名称与配色保存即生效；图标上传即生效 |
+| 能力 | 模型服务 | `/settings/models` | Embedding 与对话模型 | 保存即生效 |
+| 能力 | 联网搜索 | `/settings/web-search` | 搜索服务、站点范围、缓存限制 | 保存即生效 |
+| 检索与记忆 | 检索参数 | `/settings/retrieval` | 召回条数、两道闸门阈值、切块、记忆窗口 | 保存即生效（切块只影响新入库文档） |
+| 检索与记忆 | 记忆与上下文 | `/settings/memory` | 查看摘要、约束事实、滑出窗口的消息 | 只读 + 可重建 |
+| 扩展 | Agent 与技能 | `/settings/agents` | 上传与管理 Agent、技能定义 | 保存即生效 |
+| 部署 | 实例配置 | `/settings/instance` | 数据库、向量库、监听地址、数据目录 | **需重启** |
 
-旧地址 `/agents` 会重定向到 `/settings/agents`。
+两类配置的行为差异是有意的：
+
+- **存数据库的**（外观、模型、检索、搜索、Agent 定义）改完立刻生效，且都进 `setting_changes` 留痕。
+- **存文件的**（实例配置）决定进程怎么启动，只能重启生效。它刻意**不读数据库**——数据库地址改错时，这个页面仍然能打开、能回滚，详见 [`docs/instance-config.md`](docs/instance-config.md)。
+
+旧地址 `/agents` 会重定向到 `/settings/agents`。外观相关（配色取值、加新主题、图标规格）见 [`docs/brand.md`](docs/brand.md)。

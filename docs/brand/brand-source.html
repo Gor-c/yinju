@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<!-- 品牌陈列图的源文件。用浏览器打开后按 1040×880 截图即为 docs/brand/brand-sheet.png。
+     标记一律用相对路径引用 frontend/public 下的真实文件，避免展示稿与产品里的图形不一致。 -->
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 44px 48px 40px; overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Noto Sans SC", sans-serif;
+    background: #fbfbfc; color: #171717; -webkit-font-smoothing: antialiased;
+  }
+  .kicker { font-size: 11px; letter-spacing: .16em; color: #8f8f96; font-weight: 600; }
+  h1 { margin: 10px 0 4px; font-size: 30px; letter-spacing: -.02em; font-weight: 650; }
+  .lede { margin: 0; font-size: 13px; line-height: 1.7; color: #5d5d66; max-width: 620px; }
+  .hero { display: flex; align-items: center; gap: 26px; margin: 34px 0 8px; }
+  .hero-name b { display: block; font-size: 22px; font-weight: 650; letter-spacing: -.01em; }
+  .hero-name span { display: block; margin-top: 5px; font-size: 11px; letter-spacing: .18em; color: #8f8f96; }
+  .rule { height: 1px; background: #e7e7e8; margin: 30px 0 26px; }
+  .grid { display: flex; gap: 16px; }
+  .card { flex: 1; background: #fff; border: 1px solid #e7e7e8; border-radius: 12px; padding: 18px; }
+  .card-label { font-size: 10.5px; letter-spacing: .1em; color: #8f8f96; margin-bottom: 16px; font-weight: 600; }
+  .ladder { display: flex; align-items: flex-end; gap: 18px; }
+  .ladder div { text-align: center; }
+  .ladder em { display: block; margin-top: 7px; font-size: 10px; font-style: normal; color: #b0b0b6; }
+  .darkcard { background: #171717; border-color: #171717; }
+  .darkcard .card-label { color: rgba(255,255,255,.45); }
+  .accentcard { background: #10a37f; border-color: #10a37f; }
+  .accentcard .card-label { color: rgba(255,255,255,.6); }
+  .stack { display: flex; gap: 14px; align-items: center; }
+  .phone { display: flex; gap: 14px; align-items: center; }
+  .appicon { width: 62px; height: 62px; border-radius: 14px; overflow: hidden; box-shadow: 0 4px 10px rgba(0,0,0,.14); }
+  .appicon img { width: 100%; height: 100%; display: block; }
+  .notes { display: flex; gap: 16px; margin-top: 26px; }
+  .note { flex: 1; font-size: 12px; line-height: 1.75; color: #5d5d66; }
+  .note b { display: block; color: #171717; font-size: 12px; margin-bottom: 3px; }
+  .swatch { display: flex; gap: 10px; margin-top: 18px; }
+  .sw { flex: 1; }
+  .sw i { display: block; height: 34px; border-radius: 7px; border: 1px solid #e7e7e8; }
+  .sw span { display: block; margin-top: 6px; font-size: 10.5px; color: #8f8f96; }
+  .hint { margin: 14px 0 0; font-size: 11px; line-height: 1.7; color: #8f8f96; }
+</style></head>
+<body>
+  <div class="kicker">BRAND MARK</div>
+  <h1>知识库管理</h1>
+  <p class="lede">一页文档，三条片段，其中一条被强调色点亮——这是这个系统唯一要做的事：从大量原文里精确取回那一段。</p>
+
+  <div class="hero">
+    <img src="../../frontend/public/logo-mark.svg" width="96" height="96" alt="">
+    <div class="hero-name"><b>知识库管理</b><span>KNOWLEDGE AGENT</span></div>
+  </div>
+
+  <div class="rule"></div>
+
+  <div class="grid">
+    <div class="card">
+      <div class="card-label">尺寸阶梯</div>
+      <div class="ladder">
+        <div><img src="../../frontend/public/favicon.svg" width="16" alt=""><em>16</em></div>
+        <div><img src="../../frontend/public/favicon.svg" width="24" alt=""><em>24</em></div>
+        <div><img src="../../frontend/public/logo-mark.svg" width="32" alt=""><em>32</em></div>
+        <div><img src="../../frontend/public/logo-mark.svg" width="48" alt=""><em>48</em></div>
+        <div><img src="../../frontend/public/logo-mark.svg" width="72" alt=""><em>72</em></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-label">应用图标</div>
+      <div class="phone">
+        <span class="appicon"><img src="../../frontend/public/icon-512.png" alt=""></span>
+        <span class="appicon" style="width:44px;height:44px;border-radius:10px"><img src="../../frontend/public/icon-512.png" alt=""></span>
+      </div>
+      <p class="hint">简化版：无外轮廓时折角会读成孤立三角形，<br>所以这一版去掉折角，只留三条线与强调色。</p>
+    </div>
+  </div>
+
+  <div class="grid" style="margin-top:16px">
+    <div class="card darkcard">
+      <div class="card-label">深色底</div>
+      <div class="stack">
+        <img src="../../frontend/public/logo-mark-dark.svg" width="32" alt="">
+        <img src="../../frontend/public/logo-mark-dark.svg" width="52" alt="">
+      </div>
+    </div>
+    <div class="card accentcard">
+      <div class="card-label">强调色底</div>
+      <div class="stack">
+        <img src="../../frontend/public/logo-mark.svg" width="32" alt="">
+        <img src="../../frontend/public/logo-mark.svg" width="52" alt="">
+      </div>
+    </div>
+  </div>
+
+  <div class="notes">
+    <div class="note">
+      <b>为什么是「文档 + 高亮行」</b>
+      产品核心动作是检索命中。折角说明它是一份文档，三条线是切分后的片段，中间那条用强调色——被命中的那一段。不用放大镜，因为放大镜讲的是「查」，这里讲的是「定位到原文」。
+    </div>
+    <div class="note">
+      <b>小尺寸的策略</b>
+      16/24px 换成两线版（favicon）：三条线在这个尺寸会糊成一片，减线加粗之后仍能读出「深色方块里有一条绿」。
+    </div>
+    <div class="note">
+      <b>和界面的关系</b>
+      配色全部取自现有令牌（#171717 与 #10a37f），不引入第二种强调色，所以标记放进侧栏不会显得像贴上去的。
+    </div>
+  </div>
+
+  <div class="swatch">
+    <div class="sw"><i style="background:#171717"></i><span>#171717 · 文档</span></div>
+    <div class="sw"><i style="background:#10a37f"></i><span>#10a37f · 命中</span></div>
+    <div class="sw"><i style="background:#ffffff"></i><span>#ffffff · 片段</span></div>
+  </div>
+</body></html>

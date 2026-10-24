@@ -8,53 +8,227 @@
 flowchart LR
     subgraph clients[使用方]
         Browser[浏览器 / Vue 3]
-        WB[WorkBuddy]
-        Other[MCP Host / Agent]
+        MCPHost[WorkBuddy / MCP Host]
     end
 
     subgraph service[知识库服务 Go]
         HTTP[Gin HTTP API]
         UI[静态前端]
         Upload[上传 API]
-        Worker[索引 Worker 队列]
+        Worker[索引 Worker]
+        Pipeline[rag.Pipeline]
+        Memory[会话记忆]
         Agent[Agent Runtime / SSE]
         Tools[Tool Registry]
-        MCP[MCP Streamable HTTP]
+        MCP[MCP endpoint]
         VS[vectorstore.Store]
     end
 
     subgraph data[存储与模型]
-        PG[(PostgreSQL<br/>units / documents / document_units<br/>doc_chunks / index_jobs / agent_runs)]
-        Files[(上传目录)]
-        Vec[(Chroma 或 pgvector<br/>metadata 以 doc_id 归属)]
-        Model[多来源模型<br/>对话 + 向量<br/>Ollama / 云端]
+        PG[(PostgreSQL)]
+        Files[(上传与图标目录)]
+        Vec[(Chroma 或 pgvector)]
+        Model[模型服务]
+        Boot[(instance.env)]
     end
 
     Browser -->|静态页面| UI
     Browser -->|/api/v1/*| HTTP
     HTTP --> Upload
-    Upload -->|保存原件| Files
-    Upload -->|写 index_jobs queued| PG
+    Upload -->|原件| Files
+    Upload -->|index_jobs| PG
     HTTP --> Worker
-    Worker -->|SKIP LOCKED 领取| PG
-    Worker -->|解析 / 切块| Files
-    Worker -->|批量 embedding| Model
-    Worker -->|doc_id 向量| VS
+    Worker -->|SKIP LOCKED| PG
+    Worker -->|切块 / 嵌入| Pipeline
+    Worker -->|向量| VS
+    Worker -->|章节结构| PG
+
+    HTTP -->|/retrieve /ask| Pipeline
+    Pipeline -->|向量召回| VS
+    Pipeline -->|关键词召回 pg_trgm| PG
+    Pipeline -->|embed / rerank| Model
     VS --> Vec
+
     HTTP --> Agent
     Agent --> Tools
-    Tools -->|unit → document_units → doc_id| PG
-    Tools -->|按 doc_id 集合检索| VS
-    Tools -->|query embedding| Model
+    Tools -->|按 doc_id 检索| Pipeline
+    Agent -->|窗口 / 摘要 / 事实| Memory
+    Memory --> PG
     Agent -->|chat completions| Model
+
     HTTP --> MCP
-    WB & Other -->|Bearer Token| MCP
+    MCPHost -->|Bearer Token| MCP
     MCP --> Tools
+
+    Boot -.->|启动时加载，决定连谁| HTTP
 ```
 
-`vectorstore.Store` 是向量库替换边界（pgvector / Chroma v2）。文档是独立实体：`documents(doc_id)` + `document_units(doc_id, unit_id)` 表达「一份文档可被多个知识库引用」，向量只按 `doc_id` 存一份。检索时先把知识库集合翻译成 `doc_id` 集合，再过滤向量库。模型配置支持多来源（`model_providers` + `model_selection`），对话与向量可分别指向不同端点（本地 Ollama 或云端）。内置 Agent 与 MCP 复用同一组工具实现，但分别走 `/agent/*` 与 `/mcp`。
+`vectorstore.Store` 是向量库替换边界（pgvector / Chroma v2）。文档是独立实体：`documents(doc_id)` + `document_units(doc_id, unit_id)` 表达「一份文档可被多个知识库引用」，向量只按 `doc_id` 存一份。检索时先把知识库集合翻译成 `doc_id` 集合，再过滤向量库。模型配置支持多来源（`model_providers` + `model_selection`），**对话、向量、重排**三个角色可分别指向不同端点（本地 Ollama 或云端）；重排未单独配置时跟随对话来源。内置 Agent 与 MCP 复用同一组工具实现，但分别走 `/agent/*` 与 `/mcp`。
 
-### 1.2 上传与索引流程（上传 → 解析 → 索引）
+图里有三处值得单独说明，因为它们决定了「改动落在哪」：
+
+- **检索是一条独立的流水线**（`rag.Pipeline`）。上传侧的嵌入与检索侧的查询向量走的是同一个 `Embedder`、同一份 `Identity`（模型 + 维度）；两者不一致会直接拒绝检索，而不是让两套向量静默混算。
+- **会话记忆不参与检索**。它只在组装 prompt 时注入，作用是「别忘掉用户说过什么」；摘要与事实被明确标注为不可作为回答依据，也不进引用编号。
+- **配置分两条通道**：数据库里的随保存生效，`instance.env` 里的要重启（且 `PG_DSN` 这类引导期配置只能放文件，否则改错就再也打不开页面）。见 [1.1.2](#112-配置的两条通道)。
+
+### 1.1.1 分层与扩展点
+
+代码按「一个包一件事」切分，依赖方向单向：`app → rag → vectorstore`、`app → agent`。
+
+| 包 | 职责 | 不该出现的东西 |
+|---|---|---|
+| `internal/rag` | 检索编排：切块、嵌入、多路召回、RRF 融合、重排、证据判定 | SQL、HTTP、环境变量、日志 |
+| `internal/agent` | 工具循环与工具目录：消息转录、并发执行、步数上限、`Catalog` | 业务查询、向量检索 |
+| `internal/app` | 装配层：HTTP、数据库、模型客户端，把上面两层接起来 | 检索排序算法 |
+| `internal/vectorstore` | 向量读写边界（pgvector / Chroma） | 检索策略与阈值 |
+
+分层的实际收益是**替换成本**，不是好看。检索链路的四个可替换点：
+
+| 接口 | 方法 | 换掉它意味着 | 现有实现 |
+|---|---|---|---|
+| `rag.Embedder` | `Embed(texts) ([][]float64, error)` | 换嵌入模型或服务商 | `Server.Embed` → OpenAI-compatible `/embeddings` |
+| `rag.Channel` | `Fetch(ctx, Request) ([]Match, error)` | 加/减一路召回 | `vector`（向量）、`keyword`（pg_trgm） |
+| `rag.Reranker` | `Rerank(query, docs) ([]float64, error)` | 换精排模型 | `httpReranker` → `/rerank` |
+| `rag.Chunker` | `Chunk(text) []Chunk` | 换切块策略（按段落、按条款） | `FixedChunker`（1800 / 240） |
+
+加一路召回不改编排逻辑，在 `internal/app/retrieval.go` 的 `Channels` 里 append 一项即可：
+
+```go
+{
+    Name: "graph",
+    Fetch: func(ctx context.Context, req rag.Request) ([]rag.Match, error) {
+        return s.graphSearch(ctx, req.DocIDs, req.Query)
+    },
+},
+```
+
+权重不用调：融合走 RRF（只看排名，不看分数量纲），新增一路不会把原有排序整体推偏。
+单路失败自动降级，只有**全部**通道失败才判定检索失败。
+
+工具的插拔点在 `internal/app/agent_tools.go`：
+
+- 内置工具在 `builtinTools` 里声明一次（元数据 `spec` + 构造函数 `build`），
+  白名单、展示顺序、上传定义校验全部由它派生，**不维护第二份清单**。
+  新增内置工具 = 往 `builtinTools` 加一个元素。
+- 外部来源（MCP 连接器、租户自定义工具）在 `toolCatalog` 里注册即可：
+  `Add` 受技能白名单裁剪，`AddAlways` 不受裁剪（用于用户本轮显式开启的运行时能力，如联网搜索）。
+- 提示词里的「本次可用工具」清单与实际注册集合同源，不会出现「提示词说有、调用时没有」。
+
+**向量空间身份**是这套分层里唯一的硬约束：`documents` 记录
+`embedding_model / embedding_dim / chunker`。检索前比对，不一致直接返回
+`rag.IdentityMismatch`（错误信息带重建命令），而不是让两套向量静默混算；
+重新上传同名文档时也先比对身份，不一致走重建而非复用旧向量。
+老索引（未登记身份）放行一次并告警，重建后自动受保护。
+
+### 1.1.2 配置的两条通道
+
+系统里的配置分两类，分界线不是「重不重要」，而是**改动能不能热生效**——而这又取决于它存在哪。
+
+| | 存数据库 | 存文件 |
+|---|---|---|
+| 载体 | `brand_settings`、`model_settings`、`retrieval_settings`、`web_search_settings`、`agent_experts/skills` | `data/instance.env`（页面写入）、`.env`（人工维护） |
+| 内容 | 外观、模型、检索参数、联网搜索、Agent 定义 | 数据库地址、向量库类型、监听地址、数据目录 |
+| 生效 | 保存即生效（缓存 5 秒或主动失效） | 需重启进程 |
+| 留痕 | `setting_changes`（旧值 → 新值） | 文件本身 + `.bak` 备份 |
+| 入口 | 对应设置页 | 设置 → 部署 → 实例配置 |
+
+**为什么数据库地址不能存在数据库里。** 如果 `PG_DSN` 存在 PG 里，改错一次就连不上；连不上就打不开页面；打不开页面就只能 ssh 到服务器改文件。所以「引导期配置」（bootstrap）必须落在文件里，而且**读取它的 handler 不能依赖数据库连接**——`internal/app/instance.go` 的全部接口都遵守这条，这不是顺手做的好意，而是功能成立的前提。
+
+新增一项配置时，用两个问题定位置：
+
+1. **它影响的是「怎么用」还是「怎么起」？** 检索行为、提示词、外观属于前者 → 数据库；连接哪个库、听哪个端口、文件放哪属于后者 → 文件。
+2. **改错了会不会让服务起不来？** 会 → 文件 + 页面标注「需重启」+ 保存前实测一次；不会 → 数据库，保存即生效。
+
+文件配置的优先级链（`loadEnvFile` 对已存在的变量跳过，所以先加载的赢）：
+
+```
+进程环境变量（systemd / docker -e）> data/instance.env（页面写入）> .env（人工维护）> 代码默认值
+```
+
+这条链决定了页面上的「来源」标注：一个键如果被外部环境变量占住，页面会把它标成「环境变量」并禁用输入框——因为改了也不会生效。
+
+### 1.2 端到端流程总览（配置 → 入库 → 问答）
+
+```mermaid
+flowchart LR
+    subgraph config[配置：三个模型角色]
+        C1[选中的来源<br/>llm / embed / rerank] --> C2[手工配置]
+        C2 --> C3[环境变量]
+        C3 --> C4[默认值]
+    end
+
+    subgraph ingest[入库：只收文件，异步处理]
+        U1[POST /upload] -->|202 + job_id| U2[(index_jobs<br/>queued / pending)]
+        U2 --> U3[worker: phase=parse<br/>提取文本]
+        U3 -->|无文本层| UF[failed phase=parse<br/>保留源文件]
+        U3 --> U4{doc_id 已存在}
+        U4 -->|是| U5[只建立知识库关联<br/>复用已有向量]
+        U4 -->|否| U6[phase=index<br/>切块 + embedding]
+        U6 --> U7[(向量库按 doc_id<br/>+ chunk_text 关键词镜像)]
+        U6 -->|失败| UI[failed phase=index<br/>可重试]
+    end
+
+    subgraph qa[问答：身份校验 + 两路召回 + 精排 + 双层拒答]
+        Q1[用户问题] --> Q0{向量身份一致?}
+        Q0 -->|否| QE[503 + 重建索引命令]
+        Q0 -->|是| Q2[向量召回 top30]
+        Q1 --> Q3[关键词召回 top30<br/>pg_trgm]
+        Q2 --> Q4[RRF 融合取 20]
+        Q3 --> Q4
+        Q4 --> Q5[rerank 打分<br/>bge-reranker-v2-m3]
+        Q5 --> Q6{有片段达到阈值}
+        Q6 -->|否| Q7[检索层拒答<br/>no_evidence，不调模型]
+        Q6 -->|是| Q8[生成回答 + 引用]
+        Q8 -->|资料不足| Q9[生成层拒答<br/>明确说没有提到]
+        Q8 --> Q10[引用定位到第 N 块]
+    end
+
+    config -.提供模型.-> ingest
+    config -.提供模型.-> qa
+    U7 -.已索引片段.-> qa
+```
+
+三个阶段各自回答一个问题：
+
+| 阶段 | 回答的问题 | 关键产物 |
+|---|---|---|
+| 配置 | 用哪个模型、从哪来 | `model_providers` / `model_selection` / `model_settings`，三层回落 |
+| 入库 | 这份文件能不能用 | `index_jobs.phase`、`documents`、向量库、`chunk_text` |
+| 问答 | 有没有依据、依据在哪 | `citations`（含 `doc_id`、`chunk_index`、`score`） |
+
+三条入口（`/ask`、Agent 对话、MCP）共用同一套检索与拒答，区别只在调用方式：
+
+| 入口 | 差异 |
+|---|---|
+| `POST /api/v1/ask` | 单轮检索 + 一次生成，同步返回 |
+| Agent 对话（SSE） | 工具循环，`vector_search` 可多次调用，最多 6 步；最后一步禁用工具强制收尾 |
+| MCP | 与 Agent 同一组工具实现，供外部客户端调用 |
+
+关键参数（都有默认值，改完跑 `go run ./cmd/eval` 验证）：
+
+| 参数 | 默认 | 作用 |
+|---|---|---|
+| 切块 / 重叠 | 1800 / 240 | 切块粒度 |
+| 批量 embedding | 16 条/批 | 索引吞吐 |
+| `RETRIEVAL_VECTOR_K` / `RETRIEVAL_KEYWORD_K` | 30 / 30 | 两路召回条数 |
+| `RETRIEVAL_FUSION_K` | 20 | 融合后送入重排的条数 |
+| `RERANK_MIN_SCORE` | 0.1 | 低于即丢弃 |
+| `RETRIEVAL_MIN_OVERLAP` | 0.28 | 二元组覆盖率闸门 |
+| `RETRIEVAL_MAX_DISTANCE` | 0.55 | 重排不可用时的距离兜底 |
+| `AGENT_MAX_STEPS` | 6 | 工具循环上限 |
+
+降级与失败路径（均已实测）：
+
+| 故障 | 行为 |
+|---|---|
+| rerank 接口不可达 | 回退融合顺序，按距离 ≤ 0.55 过滤，回答照常 |
+| embedding 失败、关键词成功 | 用关键词结果继续 |
+| 所有片段被阈值过滤 | 判为无依据，直接拒答 |
+| 模型跑满工具步数 | 最后一步禁用工具，给出部分结论而非报错 |
+| 模型 429 / 5xx | 1s→3s→9s 退避重试；已推送增量则不重试 |
+| 解析或索引失败 | `phase` 停在出错阶段，源文件保留，可重试 |
+
+### 1.3 上传与索引流程（上传 → 解析 → 索引）
 
 ```mermaid
 flowchart TD
@@ -91,7 +265,7 @@ flowchart TD
 
 队列语义：worker 每 2 秒轮询 + 上传后 `wakeWorker()` 立即触发；`attempts` 限制同一任务被领取的次数，进程重启只回收超过「任务超时 + 1 分钟」的陈旧 `running` 任务，避免多实例互抢；同一 `unit_id + filename` 由进程内文件锁串行处理。`INDEX_CONCURRENCY` 可调并发（默认 1，上限 4）。
 
-### 1.3 Agent 工具循环与流式回答
+### 1.4 Agent 工具循环与流式回答
 
 ```mermaid
 sequenceDiagram
@@ -141,7 +315,7 @@ sequenceDiagram
 - `/api/v1/ask` 仍是单轮检索 + 回答的兼容接口，不进入工具循环。
 - 远程 connector 目前仍只描述/展示，尚未实现外部 MCP client 工具调用。
 
-### 1.4 WorkBuddy / 外部 Agent 的 MCP 调用流程
+### 1.5 WorkBuddy / 外部 Agent 的 MCP 调用流程
 
 ```mermaid
 sequenceDiagram
@@ -192,7 +366,44 @@ Vue 3 / Vite
 - `deploy/schema-pgvector.sql`：仅选择 `VECTOR_STORE=pgvector` 时创建向量表。
 - `workbuddy/knowledge-base-connector`：WorkBuddy connector 源包；zip 在同目录父级。
 
-### 1.5 数据模型关系（文档中心）
+### 1.6 检索与拒答（混合检索 + 重排）
+
+```mermaid
+flowchart TD
+    Q[用户问题] --> P[并行召回]
+    P --> V[向量检索<br/>RETRIEVAL_VECTOR_K=30]
+    P --> K[关键词检索<br/>chunk_text + pg_trgm<br/>word_similarity ≥ 0.12]
+    V --> R[RRF 融合<br/>1/(60+rank) 取前 20]
+    K --> R
+    R --> RR[bge-reranker-v2-m3 重排]
+    RR -->|接口失败| FB[回退融合顺序<br/>按 distance ≤ 0.55 过滤]
+    RR --> G{score ≥ RERANK_MIN_SCORE?}
+    G -->|否| E[丢弃片段]
+    G -->|是| O{二元组覆盖率<br/>≥ RETRIEVAL_MIN_OVERLAP?}
+    O -->|否且 score < 0.5| E
+    O -->|是| OUT[进入上下文 + 引用]
+    E --> N{还有候选?}
+    N -->|否| NE[no_evidence<br/>明确拒答]
+```
+
+三个设计取舍：
+
+1. **关键词索引放在 PG，不放向量库**：`chunk_text` 是向量库的镜像表（`doc_id + chunk_index + content`），写入与向量同批、删除同步。这样 Chroma / pgvector 两种实现共用一套中文关键词召回；`pg_trgm` 按字符三元组匹配，不需要中文分词扩展。
+2. **RRF 而不是分数加权**：向量距离与 trigram 相似度量纲不可比，加权需要标定；RRF 只用排名，参数只有一个平滑常数。
+3. **两道证据闸门**：重排过滤「不相关」，二元组覆盖率过滤「话题相同但概念不同」（例如问《伦理学》而库里只有《第一哲学沉思集》，人名命中会骗过重排）。覆盖率只在重排分 < 0.5 时启用，避免误杀同义改写。
+
+拒答分两层：检索层零命中直接 `no_evidence`（不调用大模型）；有相关片段但资料不足时由系统提示约束模型明确说明「资料中没有提到」，不得用常识补全。
+
+**评测**：`eval/questions.json` 内含 16 条用例（4 个知识库，含检索层拒答 4 条、生成层拒答 1 条）。
+
+```bash
+go run ./cmd/eval            # 只跑检索（毫秒级），判定命中文件与关键词
+go run ./cmd/eval -answer    # 额外调用 /ask 验证生成层拒答
+```
+
+当前基线：检索 12/12、拒答 4/4 通过，平均 500ms/条。调检索参数前后各跑一次即可对比。
+
+### 1.7 数据模型关系（文档中心）
 
 ```mermaid
 erDiagram
@@ -234,13 +445,17 @@ erDiagram
 
 ### 前端设置导航
 
-全局侧栏底部的「设置」进入设置布局，设置页内部分类导航包含：
+全局侧栏底部的「设置」进入设置布局，设置页内部按「日常在上、底层在下」分五组：
 
-| 分类 | 路由 | 用途 |
-| --- | --- | --- |
-| 模型服务 | `/settings/models` | 分别配置向量模型与对话模型 |
-| 联网搜索 | `/settings/web-search` | 配置搜索服务、站点范围与缓存限制 |
-| Agent 与技能 | `/settings/agents` | 上传与管理 Agent、技能定义 |
+| 分组 | 分类 | 路由 | 用途 | 生效方式 |
+| --- | --- | --- | --- | --- |
+| 外观 | 系统外观 | `/settings/brand` | 名称、副标题、图标、7 套配色、3 档圆角 | 保存即生效 |
+| 能力 | 模型服务 | `/settings/models` | 分别配置向量模型与对话模型 | 保存即生效 |
+| 能力 | 联网搜索 | `/settings/web-search` | 搜索服务、站点范围与缓存限制 | 保存即生效 |
+| 检索与记忆 | 检索参数 | `/settings/retrieval` | 召回、两道闸门、切块、记忆窗口 | 保存即生效 |
+| 检索与记忆 | 记忆与上下文 | `/settings/memory` | 摘要、约束事实、滑出窗口的消息 | 只读 + 可重建 |
+| 扩展 | Agent 与技能 | `/settings/agents` | 上传与管理 Agent、技能定义 | 保存即生效 |
+| 部署 | 实例配置 | `/settings/instance` | 数据库、向量库、监听地址、数据目录 | **需重启** |
 
 Agent 与技能管理不再作为全局侧栏一级菜单；原 `/agents` 路由保留为到 `/settings/agents` 的重定向。设置布局在宽屏下显示固定的左侧分类导航和独立滚动的右侧内容面板，在窄屏下将分类导航切换为顶部横向菜单。模型服务、联网搜索的页内 Tab 在右侧内容滚动时保持可见。
 
@@ -337,6 +552,7 @@ Go 服务默认监听 `127.0.0.1:${PORT}`，默认 8080；可通过 `LISTEN_ADDR
 | 变量 | 用途 | 默认/要求 |
 | --- | --- | --- |
 | `ENV_FILE` | 启动时加载的环境文件路径 | `.env`；不存在则跳过 |
+| `INSTANCE_ENV_FILE` | 页面写入的实例配置，**先于** `ENV_FILE` 加载 | `data/instance.env`；不存在则跳过 |
 | `PORT` | HTTP 监听端口（未设置 `LISTEN_ADDR` 时生效） | `8080` |
 | `LISTEN_ADDR` | HTTP 监听地址 | `127.0.0.1:${PORT}`；远程部署时按需设为 `0.0.0.0:8080` |
 | `PG_DSN` | PostgreSQL 连接串 | 业务数据必填（Chroma 与 pgvector 模式都需要） |
@@ -346,6 +562,7 @@ Go 服务默认监听 `127.0.0.1:${PORT}`，默认 8080；可通过 `LISTEN_ADDR
 | `CHROMA_DATABASE` | Chroma database | `default_database` |
 | `CHROMA_COLLECTION` | 档案向量 collection | `knowledge_base` |
 | `UPLOAD_DIR` | 原始上传文件目录 | `./data/uploads` |
+| `BRAND_DIR` | 自定义图标目录 | `./data/brand`；多实例部署需共享卷 |
 | `MAX_UPLOAD_MB` | 单文件上传大小上限 | `20` |
 | `INDEX_TIMEOUT_MINUTES` | 单个索引任务超时 | `15` |
 | `EMBED_BASE_URL` | OpenAI-compatible embedding API 根地址 | 必填，例如服务商 `/v1` 根地址；页面保存值优先 |
@@ -372,6 +589,8 @@ Go 服务默认监听 `127.0.0.1:${PORT}`，默认 8080；可通过 `LISTEN_ADDR
 | `LOG_CONSOLE` | 是否同时输出到 stdout | `true`；systemd 下进入 journald |
 | `LOG_MAX_SIZE_MB` | 单文件轮转阈值 | `50`；`0` 表示不轮转 |
 | `LOG_MAX_BACKUPS` | 每类日志保留的轮转文件数 | `10` |
+
+优先级：**进程环境变量 > `data/instance.env` > `.env` > 代码默认值**。`loadEnvFile` 对已存在的变量跳过，所以先加载的赢；这也是「页面上改过某项、`.env` 里再改它就不生效」的原因。见 [1.1.2 配置的两条通道](#112-配置的两条通道)。
 
 示例（写入 `.env` 时必须用单引号包裹，否则 `source .env` 时 shell 会对 JSON 中的花括号/逗号做展开；直接作为进程环境变量时可省略引号）：
 
@@ -515,14 +734,35 @@ Chroma adapter 的本地集成检查（会创建并在结束时删除唯一命�
 CHROMA_URL=http://localhost:8000 CHROMA_INTEGRATION_TEST=1 go test ./internal/vectorstore -run TestChromaIntegration -v
 ```
 
-## 10. 已知限制与下一步建议
+## 10. 已知限制
 
-1. 为 chunk 写入与 `documents` 记录补充事务；任务队列已持久化并使用 `SKIP LOCKED` 抢占，worker 为单协程串行消费；向量写入与 `documents` 元数据目前跨存储，尚无版本化发布/回滚机制。
-2. 增加 MIME 内容嗅探（目前只校验扩展名）、请求级并发上限和更细的限流。
-3. 为数据库连接池、MCP 项目级授权、用户登录和操作审计补上生产安全能力。
-4. 根据真实审核数据实现正式画像分数、风险档位和审核 JSON 导入。
-5. 建立 pgvector 与 Chroma 的迁移工具，并用同一组检索用例验证不同 provider 的行为。
-6. 内部只读工具循环已实现；仍需实现外部 MCP client 工具调用，以及 connector 凭据安全保存、工具权限确认和错误回传。
-7. 检索质量仍是 dense top-k：缺少 query rewrite、score 阈值、hybrid 检索和 rerank；Agent 评测集与引用准确率指标尚未建立。
-8. 增加 OCR、页码/章节元数据及解析质量检查，再确定 chunk 策略和引用格式。
+按「会不会让人踩坑」排序，不是按工作量。
 
+### 10.1 正确性相关
+
+1. **切块与元数据写入没有事务。** 向量在向量库、`documents` 在 PG，跨存储写入没有两阶段提交。中途失败会留下「向量已写、文档未记」的状态；目前已做的兜底是任务可重试 + 复用前校验向量库实际 `Count`，但没有原子性。
+2. **上传只校验扩展名。** 品牌图标已经按魔数判断（`internal/app/brand_test.go` 锁住了），但文档上传仍看后缀。理论上可以把任意文件塞进解析流程。
+3. **大纲抽取是规则驱动的。** 制度类文档靠「第X章 / 第X条」能抽准（v5 规则），扫描件、纯表格、无条款结构的文档抽不出来——页面会如实显示「没有可识别的章节结构」，不硬凑。这是能力上限，不是 bug。
+
+### 10.2 安全与多租户
+
+4. **没有身份认证。** 所有 `/api/v1/*` 默认不校验身份，包括 `/instance/config`（返回数据库主机、库名、用户名）。**不要把服务直接暴露到公网**；要么在反向代理层加认证，要么设置 `API_TOKEN` 并确保只在内网可达。
+5. **实例配置明文存密码。** `data/instance.env` 权限 `0600`，与 `.env` 现状一致，磁盘未加密时可见。这是有意的取舍：加密需要密钥，而密钥又要存在某处，会让「自救」这件事变得更不可靠。
+6. **单实例假设。** `UPLOAD_DIR` 与 `BRAND_DIR` 里的文件不进数据库，多实例部署必须挂共享卷，否则各实例看到的原件与图标不一致。
+
+### 10.3 能力边界
+
+7. **记忆只在会话内。** 摘要与事实绑定 `conversation_id`，换个会话就归零。做跨会话长期记忆需要引入「用户」维度，而系统目前没有账号体系——得先定事实是跟人走还是跟知识库走。
+8. **评测面窄。** 16 条检索用例（5 条零命中、2 条生成层拒答），阈值 0.28 / 0.1 是针对这批调的。扩到 30+ 条、换一批文档，结论才站得住。Agent 轨迹与记忆层没有评测。
+9. **画像与风险档位是占位实现。** 分数来自规则而非审核数据，`audit_history` 的表结构留了扩展位但没接真实审核流。
+10. **OCR 缺失。** 扫描版 PDF 依赖 `pdftotext`，没有文本层就是空的。
+
+### 10.4 扩展性欠账
+
+11. **外部 MCP client 未接。** `Catalog` 的 `Add` 扩展点已就位，`connectorList` 只把 `MCP_CONNECTORS_JSON` 读给前端展示，不参与工具装配。需要一个真实 connector 才能验证。
+12. **技能带不了实现。** `skill.Tools` 只是工具名列表，实现固定在 `builtinTools`。加新能力要改代码，写技能只是换提示词。
+13. **定义是全局的，绑定才是项目级。** `agent_experts` / `agent_skills` 是全局单表，`units` 只是引用。单业务线够用，第二条业务线会出现「A 项目的专家出现在 B 的下拉里」。
+
+### 10.5 已经做完、不必再列进 TODO 的
+
+早期文档里这几条已经实现，留个说明避免重复投入：hybrid 检索（向量 + pg_trgm，RRF 融合）、cross-encoder 精排、双层拒答（阈值 + 二元组覆盖率闸门）、内联引用角标、检索分层留痕、Agent 工具循环与并发执行、持久化索引队列、内容框架与目录树、示例问题生成与验证、三层会话记忆与事实冲突消解、品牌与外观模板、实例配置页与回滚。

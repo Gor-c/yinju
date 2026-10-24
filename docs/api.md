@@ -60,18 +60,39 @@
 | POST | `/api/v1/agent/chat` | Agent 对话（工具循环，非流式） |
 | POST | `/api/v1/agent/stream` | Agent 对话（SSE 流式） |
 | GET | `/api/v1/agent/runs/:id` | 运行详情与工具调用时间线 |
+| POST | `/api/v1/retrieve` | 只检索不生成（混合检索 + 重排），用于评测与调试 |
 | GET | `/api/v1/agent/conversations?unit_id=&limit=` | 历史对话列表 |
 | GET | `/api/v1/agent/conversations/:id` | 历史对话详情（含全部消息） |
 | DELETE | `/api/v1/agent/conversations/:id` | 删除历史对话 |
 | GET | `/api/v1/connectors` | 获取 connector 描述列表 |
 | GET | `/api/v1/settings/models` | 读取模型服务配置（密钥掩码） |
 | PUT | `/api/v1/settings/models` | 保存模型服务配置并立即生效 |
-| POST | `/api/v1/settings/models/test` | 测试 embedding/chat 连通性 |
+| POST | `/api/v1/settings/models/test` | 测试 embedding / chat / rerank 连通性 |
 | POST | `/api/v1/settings/models/list` | 拉取上游可用模型列表 |
 | POST | `/api/v1/settings/models/providers` | 新增模型来源 |
 | PUT | `/api/v1/settings/models/providers/:id` | 更新模型来源 |
 | DELETE | `/api/v1/settings/models/providers/:id` | 删除模型来源（同时清理选择） |
 | POST | `/api/v1/settings/models/providers/:id/test` | 测试指定来源（`id=0` 用请求体临时值） |
+
+模型角色有三个：`llm`（对话）、`embed`（向量）、`rerank`（重排）。`GET /api/v1/settings/models` 返回三段生效配置与一个 `selection`：
+
+```json
+{
+  "embed":  {"base_url": "...", "model": "BAAI/bge-m3", "provider_id": 4, "provider_name": "siliconflow"},
+  "llm":    {"base_url": "...", "model": "deepseek-ai/DeepSeek-V4.1-Flash", "provider_id": 4},
+  "rerank": {"base_url": "...", "model": "BAAI/bge-reranker-v2-m3", "provider_id": 4,
+             "enabled": true, "min_score": 0.1},
+  "selection": {"llm": 4, "embed": 4, "rerank": 4},
+  "providers": [{"id": 4, "name": "siliconflow", "llm_model": "...", "embed_model": "...",
+                 "rerank_model": "BAAI/bge-reranker-v2-m3", "active_llm": true, "active_rerank": true}],
+  "manual": {"embed": {...}, "llm": {...}, "rerank": {...}}
+}
+```
+
+- 生效顺序：选中的来源 → 手工配置 → 环境变量。
+- `PUT /api/v1/settings/models/selection` 的 `role` 可以是 `llm`、`embed`、`rerank`；`provider_id=0` 表示不使用来源。
+- 重排未单独配置（既没有来源也没有手工值）时**跟随对话模型的端点与密钥**，模型名默认 `BAAI/bge-reranker-v2-m3`。
+- 重排开关与阈值仍来自环境变量：`RERANK_ENABLED=false` 关闭，`RERANK_MIN_SCORE` 调阈值；二者不进数据库，避免切换来源时被覆盖。
 | PUT | `/api/v1/settings/models/selection` | 切换对话/向量模型使用的来源 |
 | GET | `/api/v1/settings/web-search` | 读取联网搜索配置（密钥掩码） |
 | PUT | `/api/v1/settings/web-search` | 保存联网搜索配置并立即重建搜索客户端 |
@@ -313,6 +334,7 @@ curl '/api/v1/units/unit-xxx/graph?source=entity&doc_id=doc-7a6bfb6fad948db6'
 - `total` 是两类之和；`failed` 是失败任务数；`chunks`/`orphans` 只统计已索引文档。
 - `DELETE /api/v1/documents/:doc_id` 不受知识库范围限制：删除全部 `document_units` 关联，并清理向量与源文件（文件仍被其他记录引用时保留）。
 - 只读列表外的操作（查看片段、源文件）仍走 `/units/:id/documents/:filename/...`，用 `units[0]` 作为上下文即可。
+- 「文档库」页的「索引片段」抽屉即调用 `GET /units/:id/documents/:filename/chunks`（`units[0].unit_id` + `filename`），分页 10 条，仅在 `state=indexed` 时可用；失败项没有片段，只能重试任务。
 
 ### RAG 问答
 
@@ -328,12 +350,39 @@ curl '/api/v1/units/unit-xxx/graph?source=entity&doc_id=doc-7a6bfb6fad948db6'
 
 ```json
 {
-  "answer":"检索资料显示……",
-  "citations":[{"filename":"检查报告.docx","doc_type":"检测报告","content":"……","distance":0.18}]
+  "answer": "牵引力不得超过光缆允许张力的 80%……（1企业管理制度.docx）",
+  "citations": [
+    {
+      "source_type": "document", "unit_id": "unit-9ea2...", "unit_name": "公司入围模版",
+      "doc_id": "doc-7a6bfb6fad948db6", "filename": "1企业管理制度（定稿·排版校订版）.docx",
+      "doc_type": "制度", "chunk_index": 3, "content": "……", "distance": 0.34, "score": 0.846
+    }
+  ]
 }
 ```
 
-`distance` 是当前向量库返回的余弦距离，越小通常越相似。回答质量依赖 embedding 和 chat 服务配置。
+- `chunk_index` 是片段在文档内的序号，前端据此定位原文；`doc_id` 用于跨知识库共享的文档。
+- `distance` 是向量余弦距离（越小越相似），`score` 是重排分（0–1，越大越相关）。两者量纲不同，不要互相比较。
+- 没有片段达到阈值时返回 `{"answer": "...没有检索到...", "citations": [], "no_evidence": true}`，不再调用大模型，避免编造。
+
+### 检索链路（混合检索 + 重排 + 双层拒答）
+
+`/ask`、Agent 的 `vector_search` 工具、MCP 的 `search` 工具、`/retrieve` 共用同一条链路（实现见 `internal/rag`）：
+
+0. **身份校验**：比对 `documents.embedding_model / embedding_dim` 与当前配置。不一致时**不做检索**，直接返回 503 和可操作的重建命令——两套向量混算不会报错，只会让检索质量整体下滑，所以必须在入口拦住。老索引（未登记身份）放行一次并告警。
+1. **并行召回**：向量检索取 `RETRIEVAL_VECTOR_K`（默认 30）；关键词检索走 `chunk_text` 表的 `word_similarity`（pg_trgm，中文按字符三元组匹配）取 `RETRIEVAL_KEYWORD_K`（默认 30）。单路失败自动降级，**全部**通道失败才判定检索失败。
+2. **RRF 融合**：按 `1/(60+rank)` 累加两路排名，取前 `RETRIEVAL_FUSION_K`（默认 20）。不依赖分数量纲，异构检索天然可合。
+3. **重排**：`BAAI/bge-reranker-v2-m3`（`RERANK_MODEL`，默认沿用对话模型的端点与密钥）对候选打分，低于 `RERANK_MIN_SCORE`（默认 0.1）的丢弃。重排**未配置或调用失败**时回退到融合顺序，并按 `RETRIEVAL_MAX_DISTANCE`（默认 0.55）过滤。
+4. **证据闸门**：问题与片段的二元组覆盖率低于 `RETRIEVAL_MIN_OVERLAP`（默认 0.28）时丢弃，用于拦下「问的是库里没有的概念，但文本里恰好有同一个作者名」这类误命中。重排分 ≥ 0.5 时不启用该闸门，避免误杀同义改写。
+
+**两层拒答**：
+
+| 层 | 触发条件 | 表现 |
+|---|---|---|
+| 检索层 | 全部片段被阈值/闸门过滤 | `/ask` 返回 `no_evidence: true`；Agent 工具返回 `matches: []` 与 `note` |
+| 生成层 | 有相关片段但资料不足以回答 | 模型按系统提示明确说明「资料中没有提到 X」，不补常识 |
+
+`POST /api/v1/retrieve` 只做上面 1–4 步、不调用大模型，请求 `{"unit_id":"...","query":"...","top_k":5}`，返回 `matches[]`（含 `doc_id`、`chunk_index`、`distance`、`score`）与 `no_evidence`。
 
 ### Agent 配置与对话
 
@@ -569,3 +618,137 @@ Content-Type: application/json
 - 更换 embedding 模型、维度或语义前必须重建索引；不能在同一索引内混用模型版本。
 - Agent 运行追踪不在向量库中：`agent_runs` 记录 run 状态/token/步数，`agent_steps` 记录工具名、参数、结果预览和耗时；服务启动时仅将超过 Agent 最大运行时限的陈旧 `running` 更新为 `interrupted`。
 
+
+## 6. 内容框架、记忆与运行时配置
+
+以下接口都不在早期文档里，按功能分组。路径前缀同前：`/api/v1`。
+
+### 内容框架与示例问题
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/units/:id/outline` | 该知识库下所有文档的章节结构 |
+| `POST` | `/units/:id/outline/extract` | 强制重抽（索引完成时会自动抽一次） |
+| `GET` | `/units/:id/examples` | 示例问题，**每条都经过真实检索验证** |
+| `GET` | `/units/:id/tree` | 目录树：文档 → 章节 → 片段预览 |
+
+`outline` 的响应：
+
+```json
+{
+  "total": 161,
+  "missing": 0,
+  "documents": [
+    { "doc_id": "…", "filename": "1企业管理制度.docx", "rule_version": "v5",
+      "entries": [{ "title": "总则", "level": 1, "chunk_index": 0 }] }
+  ]
+}
+```
+
+`level` 是层级：1 章、2/3 条。抽取规则见 `outlineRuleVersion`，改规则要同步升版本号，否则老文档不会重抽。
+
+`examples` 的参数 `limit`（默认 4）。每条带 `validated: true`——生成时会用**当前检索参数**实跑一次，`no_evidence` 的直接丢弃。所以示例数量可能少于 `limit`，也可能为空（文档太短或结构太弱）。
+
+`tree` 一次性返回文档、章节和每块 140 字预览；正文按需走 `/units/:id/documents/:filename/chunks`。
+
+### 会话记忆
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/agent/conversations/:id/memory` | 摘要 + 有效事实 + 已失效事实 + 当前窗口参数 |
+| `POST` | `/agent/conversations/:id/memory/rebuild` | 清空并按当前窗口重算（会调一次模型，同步等待） |
+
+响应要点：
+
+```json
+{
+  "summary": "用户最初只看消防…后把范围放宽到质量管理",
+  "summary_upto": 132,
+  "facts": [{ "id": 9, "kind": "constraint", "topic": "scope", "content": "…",
+              "source_message_id": 129, "active": true }],
+  "history": [{ "id": 3, "content": "只看消防部分", "superseded_by": 9 }],
+  "enabled": true,
+  "window": { "messages": 20, "runes": 4000 }
+}
+```
+
+`facts` 只含 `active=true` 的；`history` 是被同主题新说法取代的旧版本（保留而不是删除，用于解释「模型为什么换了答法」）。`source_message_id` 指回原话，供页面上「第 N 条」跳转。
+
+### 检索参数与留痕
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/settings/retrieval` | 当前生效参数 + 取值范围 + 最近变更 |
+| `PUT` | `/settings/retrieval` | 保存（只传要改的字段） |
+| `GET` | `/retrieval/traces?limit=20` | 每次检索的分层计数 |
+
+`PUT` 的字段：`vector_k` `keyword_k` `fusion_k` `max_distance` `min_overlap` `min_score` `chunk_size` `chunk_overlap` `memory_messages` `memory_runes` `memory_summary`(bool) `outline_enabled`(bool)。
+
+参数存 `retrieval_settings` 单行表，**优先于环境变量**；每次保存与旧值逐项比对，写入 `setting_changes`。切块参数只影响新入库文档。
+
+`traces` 每行记录 `doc_count / vector_hits / keyword_hits / fused / reranked / kept / no_evidence / degraded / duration_ms`。它的用途是回答「为什么这次没答上来」：召回为 0 是检索问题，`reranked=0` 是精排阈值问题，`kept=0` 而 `reranked>0` 是覆盖率闸门问题。
+
+`/retrieve` 的响应里也带同一组 `stats`，所以参数页可以不查留痕表就地试算。
+
+### 品牌与外观
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/brand` | 名称、副标题、浏览器标题、图标、主题、圆角 |
+| `PUT` | `/brand` | 保存（只传要改的字段） |
+| `POST` | `/brand/logo` | 上传图标（multipart，字段名 `file`） |
+| `GET` | `/brand/logo` | 返回自定义图标，URL 带内容哈希 |
+
+`PUT` 可传 `app_name` `app_subtitle` `browser_title` `logo_source`(传 `builtin` 即恢复默认) `theme` `radius`。
+
+- `theme` 白名单：`graphite` `indigo` `azure` `pine` `amber` `violet` `rose`
+- `radius` 白名单：`compact` `standard` `soft`
+
+非法值返回 400。图标只接受 PNG / JPEG / WebP（按**魔数**判断，不看扩展名），上限 1 MB；**拒绝 SVG**——可内嵌脚本且该地址能被直接打开。文件名带 SHA-256 前缀，换图必换 URL，因此响应可长期缓存。
+
+`logo_url` 为空表示使用内置矢量标记。
+
+### 实例配置
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/instance/config` | 当前配置 + 每项来源 + 待重启项 |
+| `PUT` | `/instance/config` | 写入 `data/instance.env` |
+| `POST` | `/instance/config/test-db` | 用给定参数试连 PostgreSQL |
+| `POST` | `/instance/config/test-vector` | chroma 心跳 / pgvector 走数据库 |
+| `POST` | `/instance/config/rollback` | 用 `.bak` 覆盖当前配置 |
+
+**这组接口不依赖数据库连接**：`PG_DSN` 改错时，它们仍然可用，这是唯一的自救入口。见 [`instance-config.md`](instance-config.md)。
+
+`GET` 响应：
+
+```json
+{
+  "config_file": "./data/instance.env", "env_file": ".env",
+  "saved": true, "has_backup": true,
+  "database": { "host": "127.0.0.1", "port": "5433", "database": "fire_archive",
+                "user": "postgres", "sslmode": "disable",
+                "password_set": true,
+                "dsn_masked": "postgresql://postgres:***@127.0.0.1:5433/fire_archive?sslmode=disable" },
+  "vector": { "store": "chroma", "url": "…", "tenant": "…", "database": "…", "collection": "…" },
+  "runtime": { "listen_addr": "127.0.0.1:8081", "upload_dir": "./data/uploads", "brand_dir": "./data/brand" },
+  "sources": { "PG_DSN": "instance", "VECTOR_STORE": "env_file", "BRAND_DIR": "default" },
+  "pending": ["UPLOAD_DIR"], "locked": []
+}
+```
+
+`sources` 取值 `instance`（页面保存）/ `env_file`（.env）/ `default`（代码默认）/ `external`（进程环境变量注入，页面改不动）。`pending` 是「已写入文件但当前进程还没用上」的键。`locked` 里的键页面会禁用输入。
+
+`PUT` 的密码语义特殊：**留空表示不修改**。因为明文从不回传，这是唯一不会把密码清空的表达方式。
+
+`PUT` 默认会先试连数据库，失败返回 400 且带 `can_force: true`；确认要写入时重发并带 `"force": true`。
+
+### 其他
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/ingest/config` | 上传页展示用：`max_upload_mb` `chunk_size` `chunk_overlap` `extensions` |
+| `GET` | `/units/:id/kg/status` | 图谱抽取状态 |
+| `POST` | `/units/:id/kg/extract` | 触发图谱抽取（耗时操作，异步） |
+
+`/ingest/config` 让前端不再自己维护一份切块与大小限制，避免页面文案与后端实现脱节。
