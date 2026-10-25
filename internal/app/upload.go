@@ -691,6 +691,20 @@ func (s *Server) deleteDocument(c *gin.Context) {
 		fail(c, err)
 		return
 	}
+	// detach_only=1 表示「只解除绑定」，用于知识库详情页：
+	// 那里管理的是绑定关系，不该因为某个库解绑就销毁全局文档、向量与源文件
+	// （文档可能正要被另一个库接管，或用户只是想从本库移出）。
+	if c.Query("detach_only") == "1" {
+		logging.App().Info("document_detached",
+			"request_id", c.GetString(requestIDKey),
+			"unit_id", unit, "filename", name, "doc_id", ref.DocID,
+		)
+		c.JSON(200, gin.H{
+			"unit_id": unit, "filename": name, "doc_id": ref.DocID,
+			"deleted": true, "fully_removed": false, "detached_only": true,
+		})
+		return
+	}
 	removed, err := s.cleanupOrphanDocument(c, ref.DocID)
 	if err != nil {
 		fail(c, err)
