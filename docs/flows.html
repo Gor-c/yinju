@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>知识库系统 · 完整流程图</title>
+<style>
+  :root {
+    --ink: #1f2328;
+    --ink-2: #57606a;
+    --ink-3: #8b949e;
+    --line: #d8dee4;
+    --line-2: #eaeef2;
+    --bg: #ffffff;
+    --bg-2: #f6f8fa;
+    --accent: #0b5cad;
+    --accent-bg: #eaf2fb;
+    --ok: #1a7f37;
+    --ok-bg: #eaf6ec;
+    --warn: #9a6700;
+    --warn-bg: #fdf6e3;
+    --danger: #a40e26;
+    --danger-bg: #fdecef;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 40px 24px 64px;
+    background: var(--bg-2);
+    color: var(--ink);
+    font: 14px/1.65 -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 980px; margin: 0 auto; }
+  header.doc {
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 26px 30px;
+    margin-bottom: 22px;
+  }
+  header.doc h1 { margin: 0 0 6px; font-size: 22px; font-weight: 600; letter-spacing: .01em; }
+  header.doc p { margin: 0; color: var(--ink-2); font-size: 13px; }
+  header.doc .meta {
+    margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line-2);
+    display: flex; flex-wrap: wrap; gap: 18px; font-size: 12px; color: var(--ink-3);
+  }
+  header.doc .meta b { color: var(--ink-2); font-weight: 500; }
+
+  nav.toc {
+    background: var(--bg); border: 1px solid var(--line); border-radius: 12px;
+    padding: 14px 20px; margin-bottom: 22px;
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 2px 18px;
+  }
+  nav.toc a {
+    color: var(--ink-2); text-decoration: none; font-size: 13px;
+    padding: 4px 0; border-bottom: 1px solid transparent;
+  }
+  nav.toc a:hover { color: var(--accent); }
+  nav.toc a span { color: var(--ink-3); margin-right: 6px; font-variant-numeric: tabular-nums; }
+
+  section.flow-card {
+    background: var(--bg); border: 1px solid var(--line); border-radius: 14px;
+    padding: 24px 28px 22px; margin-bottom: 22px;
+  }
+  section.flow-card > h2 {
+    margin: 0 0 4px; font-size: 16px; font-weight: 600;
+  }
+  section.flow-card > .why { margin: 0 0 20px; color: var(--ink-2); font-size: 13px; }
+
+  .flow { display: flex; flex-direction: column; gap: 0; }
+  .row { display: flex; align-items: stretch; gap: 0; flex-wrap: wrap; }
+  .col { display: flex; flex-direction: column; gap: 0; flex: 1; }
+
+  .node {
+    position: relative; flex: 1 1 0; min-width: 120px;
+    border: 1px solid var(--line); border-radius: 9px;
+    background: #fff; padding: 9px 13px 10px;
+  }
+  .node .t { font-size: 13px; font-weight: 500; line-height: 1.45; }
+  .node .s { font-size: 11.5px; color: var(--ink-3); line-height: 1.5; margin-top: 1px; }
+  .node.in     { background: var(--bg-2); }
+  .node.core   { background: var(--accent-bg); border-color: #b6cdea; }
+  .node.store  { background: var(--bg-2); border-style: dashed; }
+  .node.ok     { background: var(--ok-bg); border-color: #b7dfc0; }
+  .node.warn   { background: var(--warn-bg); border-color: #e3cf95; }
+  .node.stop   { background: var(--danger-bg); border-color: #f0c2c8; }
+  .node .badge {
+    position: absolute; top: -9px; left: 10px;
+    font-size: 10.5px; line-height: 1; padding: 2px 6px; border-radius: 20px;
+    background: var(--ink); color: #fff; letter-spacing: .02em;
+  }
+  .node.core .badge { background: var(--accent); }
+  .node.ok .badge { background: var(--ok); }
+  .node.stop .badge { background: var(--danger); }
+  .node.warn .badge { background: var(--warn); }
+
+  .arrow-h, .arrow-v { color: var(--line); display: flex; align-items: center; justify-content: center; }
+  .arrow-h { flex: 0 0 30px; font-size: 15px; }
+  .arrow-v { height: 26px; font-size: 15px; }
+  .arrow-h small, .arrow-v small {
+    position: absolute; font-size: 10.5px; color: var(--ink-3); background: #fff; padding: 0 4px;
+  }
+  .branch-note {
+    font-size: 11.5px; color: var(--ink-3); margin: 6px 0 0 4px;
+  }
+  .rule {
+    margin-top: 18px; padding-top: 14px; border-top: 1px dashed var(--line);
+    font-size: 12.5px; color: var(--ink-2);
+  }
+  .rule b { color: var(--ink); font-weight: 500; }
+  .rule ul { margin: 6px 0 0; padding-left: 18px; }
+  .rule li { margin: 2px 0; }
+  code {
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+    font-size: 12px; background: var(--bg-2); border: 1px solid var(--line-2);
+    border-radius: 4px; padding: 1px 4px;
+  }
+  footer.doc { margin-top: 28px; color: var(--ink-3); font-size: 12px; text-align: center; }
+
+  @media (max-width: 720px) {
+    body { padding: 20px 12px 40px; }
+    .arrow-h { flex-basis: 18px; }
+    .row { gap: 0; }
+    .node { min-width: 92px; }
+  }
+  @media print {
+    body { background: #fff; padding: 0; }
+    section.flow-card, header.doc, nav.toc { break-inside: avoid; border-color: #ccc; }
+    nav.toc { display: none; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="doc">
+  <h1>知识库系统 · 完整流程图</h1>
+  <p>从配置生效、文档入库、Agent 问答、检索五层，到记忆注入与知识沉淀闭环。盒子颜色区分角色：浅蓝＝核心处理，虚线＝存储，绿＝成功出口，黄＝降级，红＝拒答/失败。</p>
+  <div class="meta">
+    <span><b>代码版本</b> 996a889</span>
+    <span><b>生成时间</b> 2026-10-25</span>
+    <span><b>形态</b> 单二进制 Go 服务 + Vue 3 静态前端</span>
+    <span><b>存储</b> PostgreSQL · Chroma / pgvector · 模型服务</span>
+  </div>
+</header>
+
+<nav class="toc">
+  <a href="#f1"><span>01</span>系统总览：请求从哪来</a>
+  <a href="#f2"><span>02</span>文档入库链路</a>
+  <a href="#f3"><span>03</span>问答链路（Agent 循环）</a>
+  <a href="#f4"><span>04</span>检索五层与拒答</a>
+  <a href="#f5"><span>05</span>记忆分层与注入顺序</a>
+  <a href="#f6"><span>06</span>知识沉淀闭环</a>
+  <a href="#f7"><span>07</span>配置生效路径</a>
+</nav>
+
+<section class="flow-card" id="f1">
+  <h2>01 · 系统总览：请求从哪来</h2>
+  <p class="why">三类调用方走三个入口，服务内部只有一个装配层把核心层接起来。</p>
+  <div class="flow">
+    <div class="row">
+      <div class="node in"><div class="t">浏览器 · Vue 3</div><div class="s">静态页 /assets，路由回落到 index.html</div></div>
+      <div class="arrow-h">→</div>
+      <div class="node in"><div class="t">Gin HTTP</div><div class="s">/api/v1/*</div></div>
+      <div class="arrow-h">→</div>
+      <div class="node core"><div class="t">internal/app 装配层</div><div class="s">路由 · 数据库 · 模型客户端 · 配置 · 留痕</div></div>
+    </div>
+    <div class="arrow-v">↓</div>
+    <div class="row">
+      <div class="node in"><div class="t">WorkBuddy / 外部 Agent</div><div class="s">Bearer Token</div></div>
+      <div class="arrow-h">→</div>
+      <div class="node in"><div class="t">MCP endpoint</div><div class="s">POST /mcp</div></div>
+      <div class="arrow-h">→</div>
+      <div class="node core"><div class="t">同一组工具实现</div><div class="s">内置 Agent 与 MCP 共用，不维护两份</div></div>
+    </div>
+    <div class="arrow-v">↓</div>
+    <div class="row">
+      <div class="node core"><div class="t">internal/rag</div><div class="s">检索编排：切块 · 融合 · 精排 · 闸门</div></div>
+      <div class="arrow-h">→</div>
+      <div class="node store"><div class="t">internal/vectorstore</div><div class="s">pgvector / Chroma v2 可替换</div></div>
+      <div class="arrow-h">→</div>
+      <div class="node store"><div class="t">PostgreSQL</div><div class="s">文档 · 片段 · 任务 · 留痕</div></div>
+    </div>
+    <div class="row" style="margin-top:14px">
+      <div class="node core"><div class="t">internal/agent</div><div class="s">工具循环：转录 · 并发执行 · 步数上限 6</div></div>
+      <div class="arrow-h">→</div>
+      <div class="node store"><div class="t">模型服务</div><div class="s">对话 / 嵌入 / 重排，可分指不同端点</div></div>
+      <div class="arrow-h">→</div>
+      <div class="node store"><div class="t">文件目录</div><div class="s">上传原件 · 品牌图标 · instance.env</div></div>
+    </div>
+  </div>
+  <div class="rule">
+    <b>依赖方向单向</b>：<code>app → rag → vectorstore</code>、<code>app → agent</code>。<code>internal/rag</code> 里没有 SQL、没有读环境变量、没有打日志，所以融合与闸门可以单测。
+  </div>
+</section>
+
+<section class="flow-card" id="f2">
+  <h2>02 · 文档入库链路</h2>
+  <p class="why">上传只负责落盘与入队；解析与索引是任务状态，失败可重试，不因文件解析不了而拒收。</p>
+  <div class="flow">
+    <div class="row">
+      <div class="node in"><div class="t">上传 / 网页导入</div><div class="s">multipart 或 URL 抓取</div></div>
+      <div class="arrow-h">→</div>
+      <div class="node"><div class="t">校验</div><div class="s">扩展名 · 大小 · 名称长度</div></div>
+      <div class="arrow-h">→</div>
+      <div class="node store"><div class="t">落盘</div><div class="s">uploads/&lt;unit&gt;/&lt;jobID&gt;_&lt;file&gt;</div></div>
+      <div class="arrow-h">→</div>
+      <div class="node store"><div class="t">index_jobs</div><div class="s">status=queued</div></div>
+    </div>
+    <div class="arrow-v">↓  worker 用 SKIP LOCKED 领取，重启可续跑</div>
+    <div class="row">
+      <div class="node"><div class="t">解析</div><div class="s">txt / md / docx / pdf / html</div></div>
+      <div class="arrow-h">→</div>
+      <div class="node"><div class="t">归一化</div><div class="s">去页眉页脚 · 合并断行</div></div>
+      <div class="arrow-h">→</div>
+      <div class="node core"><div class="t">切块</div><div class="s">1800 字 / 240 重叠</div></div>
+      <div class="arrow-h">→</div>
+      <div class="node core"><div class="t">嵌入</div><div class="s">批量调 /embeddings</div></div>
+    </div>
+    <div class="arrow-v">↓ 同一批产物写三处，缺一处就有一类检索失效</div>
+    <div class="row">
+      <div class="node store"><div class="t">向量库</div><div class="s">按 doc_id 存一份，多库共享</div></div>
+      <div class="arrow-h">→</div>
+      <div class="node store"><div class="t">chunk_text</div><div class="s">pg_trgm 关键词召回镜像</div></div>
+      <div class="arrow-h">→</div>
+      <div class="node store"><div class="t">doc_outlines</div><div class="s">章节树，抽取规则 v5</div></div>
+      <div class="arrow-h">→</div>
+      <div class="node ok"><div class="t">任务 done</div><div class="s">documents 落库 · 身份三元组</div></div>
+    </div>
+  </div>
+  <div class="rule">
+    <b>身份三元组</b>：<code>embedding_model / embedding_dim / chunker</code> 随文档落库。检索前比对——不一致拒绝并给重建命令，未登记（老数据）放行并告警。
+  </div>
+</section>
+
+<section class="flow-card" id="f3">
+  <h2>03 · 问答链路（Agent 循环）</h2>
+  <p class="why">回答问题的不止一次模型调用：先组装上下文，再在有限步数内决定调不调工具。</p>
+  <div class="flow">
+    <div class="row">
+      <div class="node in"><div class="t">用户在对话页提问</div><div class="s">POST /agent/stream（SSE）</div></div>
+      <div class="arrow-h">→</div>
+      <div class="node"><div class="t">选库与工具集</div><div class="s">unit_ids → 绑定的 Agent/技能 ∩ 白名单</div></div>
+      <div class="arrow-h">→</div>
+      <div class="node core"><div class="t">组装 system</div><div class="s">人设 → 库与工具 → 规则 1–10 → 记忆块</div></div>
+    </div>
+    <div class="arrow-v">↓</div>
+    <div class="row">
+      <div class="node core"><div class="t">LLM 流式调用</div><div class="s">带 tools 定义</div></div>
+      <div class="arrow-h">→</div>
+      <div class="node warn"><div class="t">要调工具？</div><div class="s">向量检索 / 记录 / 画像 / 联网</div></div>
+      <div class="arrow-h">→</div>
+      <div class="node"><div class="t">并发执行只读工具</div><div class="s">结果按调用顺序回填</div></div>
+      <div class="arrow-h">→</div>
+      <div class="node"><div class="t">≤ 6 步</div><div class="s">超限返回 ErrMaxSteps</div></div>
+    </div>
+    <div class="arrow-v">↓  不需要工具，或步数用尽</div>
+    <div class="row">
+      <div class="node ok"><div class="t">回答 + 引用编号</div><div class="s">[n] 由服务端分配，只能取自工具结果</div></div>
+      <div class="arrow-h">→</div>
+      <div class="node store"><div class="t">落库</div><div class="s">agent_runs · agent_steps · 会话消息</div></div>
+      <div class="arrow-h">→</div>
+      <div class="node store"><div class="t">触发记忆压缩</div><div class="s">异步，不阻塞回答</div></div>
+      <div class="arrow-h">→</div>
+      <div class="node store"><div class="t">沉淀草稿</div><div class="s">有文档依据才写，见 06</div></div>
+    </div>
+  </div>
+  <div class="rule">
+    <b>工具清单单一事实源</b>：<code>builtinTools</code> 声明一次，提示词里的「本次可用工具」、白名单校验、参数约束全部派生——不会出现「提示词说有、调用时没有」。
+  </div>
+</section>
+
+<section class="flow-card" id="f4">
+  <h2>04 · 检索五层与拒答</h2>
+  <p class="why">每一层都会丢东西，失败表现却都是「答不上来」。所以每层都要计数，才能知道是哪一层掐掉的。</p>
+  <div class="flow">
+    <div class="row"><div class="node"><div class="t">查询</div><div class="s">知识库 → doc_id 集合，先过滤再检索</div></div></div>
+    <div class="arrow-v">↓</div>
+    <div class="row">
+      <div class="node warn"><div class="t">① 身份校验</div><div class="s">匹配 / 不匹配拒绝 / 未登记放行+告警</div></div>
+    </div>
+    <div class="arrow-v">↓  分两路并行召回</div>
+    <div class="row">
+      <div class="node core"><div class="t">② 向量召回 K=30</div><div class="s">稠密语义</div></div>
+      <div class="arrow-h">＋</div>
+      <div class="node core"><div class="t">② 关键词召回 K=30</div><div class="s">pg_trgm，型号与错误码</div></div>
+    </div>
+    <div class="arrow-v">↓  单路失败自动降级，两路都失败才算检索失败</div>
+    <div class="row">
+      <div class="node core"><div class="t">③ RRF 融合</div><div class="s">只看排名，取前 20</div></div>
+      <div class="arrow-h">→</div>
+      <div class="node core"><div class="t">④ 精排 + 分数阈值</div><div class="s">cross-encoder，低于 min_score 丢弃</div></div>
+      <div class="arrow-h">→</div>
+      <div class="node core"><div class="t">⑤ 覆盖率闸门</div><div class="s">二元组覆盖率 &lt; min_overlap 丢弃</div></div>
+    </div>
+    <div class="arrow-v">↓</div>
+    <div class="row">
+      <div class="node ok"><div class="t">注入上下文</div><div class="s">带 [n] 编号与文件名</div></div>
+      <div class="arrow-h">／</div>
+      <div class="node stop"><div class="t">拒答</div><div class="s">no_evidence=true，不调模型</div></div>
+    </div>
+  </div>
+  <div class="rule">
+    <b>每次检索落一行计数</b>：<code>doc_count / vector_hits / keyword_hits / fused / reranked / kept / no_evidence / degraded / duration_ms</code>。
+    <ul>
+      <li><code>reranked=0</code> → 精排阈值问题；<code>reranked&gt;0 而 kept=0</code> → 覆盖率闸门问题。</li>
+      <li>只看「命中率」时，这两种情况长得一模一样，调参必然是盲改。</li>
+    </ul>
+  </div>
+</section>
+
+<section class="flow-card" id="f5">
+  <h2>05 · 记忆分层与注入顺序</h2>
+  <p class="why">记忆解决「别忘了用户说过什么」，它不参与检索，也不许冒充证据。</p>
+  <div class="flow">
+    <div class="row">
+      <div class="node in"><div class="t">L1 工作记忆</div><div class="s">最近 20 条原文，滑出即丢失</div></div>
+      <div class="arrow-h">→</div>
+      <div class="node core"><div class="t">L2 滚动摘要</div><div class="s">summary_upto 水位线，只压已滑出部分</div></div>
+      <div class="arrow-h">→</div>
+      <div class="node core"><div class="t">L3 原子事实</div><div class="s">topic + active，同主题新说法取代旧说法</div></div>
+    </div>
+    <div class="arrow-v">↓  一次调用同时产出摘要与事实，失败只记日志、不阻塞回答</div>
+    <div class="row">
+      <div class="node store"><div class="t">注入 position 1</div><div class="s">人设</div></div>
+      <div class="arrow-h">→</div>
+      <div class="node store"><div class="t">2 知识库与工具</div><div class="s">本次可用清单</div></div>
+      <div class="arrow-h">→</div>
+      <div class="node store"><div class="t">3 工具规则 1–10</div><div class="s">硬约束，不可被上传定义覆盖</div></div>
+      <div class="arrow-h">→</div>
+      <div class="node warn"><div class="t">4 记忆块</div><div class="s">只用于理解上下文</div></div>
+    </div>
+  </div>
+  <div class="rule">
+    <b>一条硬规则</b>：摘要与事实<b>不得作为答案依据，不得出现在引用编号里</b>。允许记忆充当证据，等于让上一轮的转述变成这一轮的证据，还附带一个看起来合法的编号。
+  </div>
+</section>
+
+<section class="flow-card" id="f6">
+  <h2>06 · 知识沉淀闭环</h2>
+  <p class="why">问答的产物不直接回写知识库：先成为草稿，人工采纳后才进入索引。模型输出不会自我强化。</p>
+  <div class="flow">
+    <div class="row">
+      <div class="node in"><div class="t">问答成功</div><div class="s">有文档引用 · 非拒答 · 非纯网页</div></div>
+      <div class="arrow-h">→</div>
+      <div class="node core"><div class="t">草稿 pending</div><div class="s">sha256(库+问+答) 去重</div></div>
+      <div class="arrow-h">→</div>
+      <div class="node warn"><div class="t">人工审核</div><div class="s">/settings/drafts，三选一</div></div>
+    </div>
+    <div class="arrow-v">↓  旁路：这两条永远不进入索引</div>
+    <div class="row">
+      <div class="node stop"><div class="t">忽略</div><div class="s">dismissed</div></div>
+      <div class="arrow-h">｜</div>
+      <div class="node warn"><div class="t">整理（每小时·满 8 条）</div><div class="s">聚成主题笔记 → 新草稿 pending，原问答标 merged</div></div>
+    </div>
+    <div class="arrow-v">↓  主链：只有采纳这一条会进入知识库</div>
+    <div class="row">
+      <div class="node ok"><div class="t">采纳</div><div class="s">生成 draft-&lt;id&gt;-&lt;kind&gt;.md</div></div>
+      <div class="arrow-h">→</div>
+      <div class="node store"><div class="t">index_jobs</div><div class="s">doc_type=问答沉淀</div></div>
+      <div class="arrow-h">→</div>
+      <div class="node store"><div class="t">切块 · 嵌入 · 大纲</div><div class="s">与普通上传完全一致</div></div>
+      <div class="arrow-h">→</div>
+      <div class="node ok"><div class="t">可被检索</div><div class="s">下一次问答的依据来源扩大</div></div>
+    </div>
+  </div>
+  <div class="rule">
+    <b>证据不自我强化</b>：沉淀时过滤 <code>doc_type=问答沉淀</code> 的引用，否则问答 → 沉淀 → 再检索 → 再沉淀会逐层放大模型误差；若过滤后没有来源，就不产生新草稿，闭环自然终止。
+  </div>
+</section>
+
+<section class="flow-card" id="f7">
+  <h2>07 · 配置生效路径</h2>
+  <p class="why">分界线不是「重不重要」，而是「改错了会不会让读它的地方不可用」。</p>
+  <div class="flow">
+    <div class="row">
+      <div class="node in"><div class="t">进程环境变量</div><div class="s">最高优先级，覆盖文件</div></div>
+      <div class="arrow-h">→</div>
+      <div class="node in"><div class="t">data/instance.env</div><div class="s">页面写入：DSN · 向量库 · 端口 · 目录</div></div>
+      <div class="arrow-h">→</div>
+      <div class="node in"><div class="t">.env</div><div class="s">人工维护</div></div>
+      <div class="arrow-h">→</div>
+      <div class="node"><div class="t">代码默认值</div><div class="s">兜底</div></div>
+    </div>
+    <div class="arrow-v">↓  加载时对已存在的变量跳过，所以「先加载的赢」——顺序写反就会静默不生效</div>
+    <div class="row">
+      <div class="node warn"><div class="t">需重启</div><div class="s">会阻塞启动的：DSN · 端口 · 密钥 · 向量库地址</div></div>
+      <div class="arrow-h">／</div>
+      <div class="node ok"><div class="t">热生效</div><div class="s">外观 · 模型 · 检索阈值 · 记忆窗口 · 专家技能</div></div>
+      <div class="arrow-h">／</div>
+      <div class="node store"><div class="t">变更留痕</div><div class="s">key / old / new / source / 时间</div></div>
+    </div>
+  </div>
+  <div class="rule">
+    <b>自救援</b>：配置页的 handler 不依赖它正在配置的资源（否则 DSN 改错就再也打不开页面）；写入前实测连接，失败默认拒绝并留 <code>force</code> 绕过；写入前备份，页面能识别「已保存未生效」。
+  </div>
+</section>
+
+<footer class="doc">
+  与 <code>docs/development.md</code> 的架构图、<code>docs/api.md</code> 的接口契约互为参照。<br>
+  所有流程均在 2026-10-25 的真实运行环境中走过一遍；未验证项已在开发手册中标注。
+</footer>
+
+</div>
+</body>
+</html>
