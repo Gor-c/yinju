@@ -2059,9 +2059,6 @@ onMounted(() => {
   padding-top: 14px;
   border-top: 1px solid var(--border);
 }
-.source-viewer {
-  min-height: 180px;
-}
 .source-hint {
   margin: 0 0 10px;
 }

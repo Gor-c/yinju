@@ -1622,7 +1622,9 @@ html.dark .notice.error {
   margin: 0 0 16px;
 }
 
-.unit-edit-dialog .el-dialog {
+/* el-dialog 的 class 落在 .el-dialog 元素本身，所以必须写成复合选择器。
+   写成 `.unit-edit-dialog .el-dialog`（后代）永远匹配不到，max-height 会失效。 */
+.unit-edit-dialog.el-dialog {
   display: flex;
   max-height: 90vh;
   flex-direction: column;
@@ -1804,15 +1806,21 @@ html.dark .notice.error {
   }
 }
 
-.source-dialog .el-dialog__body {
-  padding-top: 8px;
-}
-.source-dialog .el-dialog {
+/* 预览对话框：只有内容区滚动，标题与页脚固定。
+   之前 .source-viewer 给了固定高度，但内部的 el-tabs 没有被约束，
+   长文档（尤其 markdown 原文预览）会直接溢出到底部页脚上、并被
+   .el-dialog 的 overflow:hidden 截断——看起来就是「内容压在按钮下面」。 */
+/* 注意是 `.source-dialog.el-dialog`：el-dialog 会把 class 挂到 .el-dialog 自身，
+   写成后代选择器永远不生效（原来就是这么失效的）。 */
+.source-dialog.el-dialog {
+  display: flex;
+  flex-direction: column;
   max-height: 94vh;
   overflow: hidden;
   border-radius: 16px;
 }
 .source-dialog .el-dialog__header {
+  flex: none;
   padding: 18px 22px 10px;
 }
 .source-dialog .el-dialog__title {
@@ -1824,24 +1832,57 @@ html.dark .notice.error {
   white-space: nowrap;
 }
 .source-dialog .el-dialog__body {
-  padding: 0 22px 10px;
+  /* 三个要点缺一不可：
+     1) flex: 1 1 auto（不是 1 1 0）——对话框高度是按内容撑起来的，
+        基准设成 0 会让整个对话框缩成一条；
+     2) display:flex —— body 默认是 block，里面的 flex:1 完全不起作用，
+        内容会按自身高度长出去、被 overflow:hidden 裁掉，看上去就是「看不全也不能滚」；
+     3) min-height:0 —— 允许被压缩，否则内容会把 body 顶出 max-height。 */
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  padding: 8px 22px 10px;
+  overflow: hidden;
 }
 .source-dialog .el-dialog__footer {
+  flex: none;
   padding: 12px 22px 16px;
   border-top: 1px solid var(--border);
 }
 .source-viewer {
-  height: min(74vh, 820px);
-  min-height: 360px;
   display: flex;
+  flex: 1 1 auto;
   flex-direction: column;
+  /* 不设 min-height：小屏幕上固定下限会把页脚顶出可视区。 */
+  min-height: 0;
+}
+.source-tabs {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+.source-tabs > .el-tabs__header {
+  flex: none;
+  margin-bottom: 0;
+}
+/* 唯一滚动容器：内容再长也只在这块里滚。 */
+.source-tabs > .el-tabs__content {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
 }
 .source-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
   padding: 8px 2px 12px;
+  background: var(--surface);
   border-bottom: 1px solid var(--line, #e8ebf0);
 }
 .source-actions {
@@ -1857,8 +1898,7 @@ html.dark .notice.error {
   font-size: calc(12px * var(--fs-scale));
 }
 .source-content {
-  flex: 1;
-  overflow: auto;
+  /* 滚动交给 .source-tabs__content 一处处理，这里再滚会出现双滚动条。 */
   margin: 0;
   padding: 18px 20px;
   color: #263445;
@@ -2053,9 +2093,9 @@ html.dark .notice.error {
   .source-dialog {
     width: 96vw !important;
   }
-  .source-viewer {
-    height: 70vh;
-    min-height: 300px;
+  /* 高度交给 flex 分配，不写死 vh；写死会把页脚顶出屏幕。 */
+  .source-dialog.el-dialog {
+    max-height: 92vh;
   }
   .source-dialog .el-dialog__header,
   .source-dialog .el-dialog__body,
