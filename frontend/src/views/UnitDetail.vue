@@ -29,7 +29,7 @@
         <div class="uf-stats">
           <b>{{ outlineTotal }}</b> 个章节
           <span class="uf-sep">·</span>
-          <b>{{ indexDocs.length || 0 }}</b> 份文档
+          <b>{{ profile?.document_count ?? 0 }}</b> 份文档
           <span class="uf-sep">·</span>
           <b>{{ profile?.indexed_chunks ?? 0 }}</b> 个片段
         </div>
@@ -71,20 +71,13 @@
     </section>
 
     <el-tabs v-model="tab" class="tabs unit-detail-tabs">
-      <el-tab-pane :label="`文档 ${indexDocs.length ? `(${indexDocs.length})` : ''}`" name="documents">
+      <el-tab-pane :label="`文档 ${profile?.document_count ? `(${profile.document_count})` : ''}`" name="documents">
         <div class="panel" style="padding: 18px">
-          <div class="tab-toolbar">
-            <span class="muted">
-              共 {{ indexDocs.length }} 份已索引文档 · {{ profile?.indexed_chunks ?? 0 }} 个文本块
-            </span>
-            <div style="display: flex; align-items: center; gap: 10px">
-              <el-tag v-if="activeJobs.length" size="small" type="warning" effect="light">
-                {{ activeJobs.length }} 个任务进行中
-              </el-tag>
-              <el-button link type="primary" size="small" :loading="docsLoading" @click="loadDocuments">
-                刷新
-              </el-button>
-            </div>
+          <div v-if="activeJobs.length" class="tab-toolbar">
+            <span class="muted">{{ profile?.indexed_chunks ?? 0 }} 个文本块</span>
+            <el-tag size="small" type="warning" effect="light">
+              {{ activeJobs.length }} 个任务进行中
+            </el-tag>
           </div>
 
           <div v-for="j in activeJobs" :key="j.job_id" class="job-card">
@@ -124,32 +117,18 @@
             </div>
           </div>
 
-          <el-table :data="indexDocs" v-loading="docsLoading" style="margin-top: 8px">
-            <el-table-column label="文件名" min-width="260">
-              <template #default="s">
-                <div>{{ s.row.filename }}</div>
-                <div class="muted" style="font-size: calc(11.5px * var(--fs-scale))">{{ s.row.doc_id }}</div>
-              </template>
-            </el-table-column>
-            <el-table-column prop="doc_type" label="类型" width="120" />
-            <el-table-column prop="chunk_count" label="文本块" width="100" />
-            <el-table-column label="索引时间" width="190">
-              <template #default="s">{{ formatDate(s.row.indexed_at) || '—' }}</template>
-            </el-table-column>
-            <el-table-column label="操作" width="230" fixed="right">
-              <template #default="s">
-                <el-button link type="primary" @click="openSource(s.row)">查看源文档</el-button>
-                <el-button link @click="openChunks(s.row)">索引片段</el-button>
-                <el-button link type="danger" @click="removeDoc(s.row)">删除</el-button>
-              </template>
-            </el-table-column>
-            <template #empty>
-              <div class="muted" style="padding: 32px 0">还没有已完成索引的文档，上传后会自动出现在这里。</div>
-            </template>
-          </el-table>
+          <DocumentExplorer
+            scope="unit"
+            :unit-id="id"
+            dense
+            preview-mode="emit"
+            empty-title="这个知识库还没有文档"
+            empty-hint="上传文档后会自动出现在这里。"
+            @preview="openSource"
+            @changed="refreshAfterDocChange"
+          />
         </div>
       </el-tab-pane>
-
       <el-tab-pane label="Agent 问答" name="agent">
         <div class="panel" style="padding: 26px">
           <p class="subtitle" style="margin-bottom: 16px">带上该项目档案进入 Agent，检索回答会附上文件名和片段。</p>
@@ -397,34 +376,6 @@
       </el-tab-pane>
     </el-tabs>
 
-    <el-drawer v-model="chunkDrawer" :title="chunkTitle" size="min(720px, 94vw)" class="chunk-drawer">
-      <div v-if="chunkError" class="notice error">{{ chunkError }}</div>
-      <div class="chunk-summary muted">
-        <span>索引文本片段</span>
-        <span>共 {{ chunkTotal || '—' }} 块</span>
-      </div>
-      <div class="chunk-list" v-loading="chunkLoading">
-        <div v-for="c in chunkItems" :key="c.index" class="chunk-card">
-          <div class="chunk-head">
-            <b>片段 {{ c.index + 1 }}</b>
-            <span class="muted">{{ c.content.length.toLocaleString() }} 字</span>
-          </div>
-          <pre class="chunk-text">{{ c.content }}</pre>
-        </div>
-        <div v-if="!chunkItems.length && !chunkLoading && !chunkError" class="chunk-empty muted">没有可显示的分块内容。</div>
-      </div>
-      <div class="chunk-pager">
-        <span class="muted">{{ chunkItems.length ? `${chunkOffset + 1}–${chunkOffset + chunkItems.length}` : '0' }} / {{ chunkTotal || '—' }}</span>
-        <div>
-        <el-button :disabled="chunkOffset === 0" :loading="chunkLoading" @click="fetchChunks(Math.max(0, chunkOffset - chunkPageSize))">
-          上一页
-        </el-button>
-        <el-button :disabled="!chunkHasMore" :loading="chunkLoading" @click="fetchChunks(chunkOffset + chunkPageSize)">
-          下一页
-        </el-button>
-        </div>
-      </div>
-    </el-drawer>
 
     <el-dialog v-model="sourceDialog" :title="sourceTitle" width="min(1200px, 94vw)" top="3vh" class="source-dialog">
       <div class="source-viewer">
@@ -470,6 +421,7 @@ import axios from 'axios'
 import { ElMessage } from 'element-plus'
 import { forceCenter, forceCollide, forceLink, forceManyBody, forceSimulation, forceX, forceY } from 'd3-force-3d'
 import DocumentPreview from '../components/DocumentPreview.vue'
+import DocumentExplorer from '../components/DocumentExplorer.vue'
 import { jobPhaseLabel, jobStageState } from '../jobPhase'
 import { describeIndexError } from '../utils/indexError'
 
@@ -661,20 +613,9 @@ const previewTools = computed(() => {
   return both.length ? both : [...skillTools]
 })
 
-const indexDocs = ref<IndexDoc[]>([])
 const unitJobs = ref<JobItem[]>([])
 const docsLoading = ref(false)
 
-const chunkDrawer = ref(false)
-const chunkLoading = ref(false)
-const chunkError = ref('')
-const chunkItems = ref<Array<{ index: number; content: string }>>([])
-const chunkOffset = ref(0)
-const chunkTotal = ref(0)
-const chunkHasMore = ref(false)
-const chunkDoc = ref<IndexDoc | null>(null)
-const chunkPageSize = 5
-const chunkTitle = computed(() => (chunkDoc.value ? `${chunkDoc.value.filename} · 索引内容` : '索引内容'))
 
 const sourceDialog = ref(false)
 const sourceLoading = ref(false)
@@ -725,7 +666,8 @@ async function copySource() {
   }
 }
 
-async function openSource(row: IndexDoc) {
+// 组件 emit 的 DocItem 与 IndexDoc 字段兼容，但 doc_id 可能为空，这里放宽为 any。
+async function openSource(row: any) {
   sourceDoc.value = row
   sourceContent.value = ''
   sourceQuery.value = ''
@@ -752,33 +694,7 @@ async function openSource(row: IndexDoc) {
   }
 }
 
-function openChunks(row: IndexDoc) {
-  chunkDoc.value = row
-  chunkItems.value = []
-  chunkOffset.value = 0
-  chunkTotal.value = row.chunk_count || 0
-  chunkDrawer.value = true
-  fetchChunks(0)
-}
 
-async function fetchChunks(offset: number) {
-  if (!chunkDoc.value) return
-  chunkLoading.value = true
-  chunkError.value = ''
-  try {
-    const base = `/api/v1/units/${encodeURIComponent(id.value)}/documents/${encodeURIComponent(chunkDoc.value.filename)}/chunks`
-    const { data } = await axios.get(base, { params: { offset, limit: chunkPageSize } })
-    chunkItems.value = data?.chunks || []
-    chunkOffset.value = data?.offset ?? offset
-    chunkHasMore.value = !!data?.has_more
-    if (data?.chunk_count) chunkTotal.value = data.chunk_count
-  } catch (e: any) {
-    chunkItems.value = []
-    chunkError.value = e.response?.data?.error || '读取索引内容失败。'
-  } finally {
-    chunkLoading.value = false
-  }
-}
 
 const activeJobs = computed(() =>
   unitJobs.value.filter((j) => j.status === 'queued' || j.status === 'running'),
@@ -791,13 +707,10 @@ async function loadDocuments() {
   docsLoading.value = true
   const hadActive = activeJobs.value.length > 0
   try {
-    const base = `/api/v1/units/${encodeURIComponent(id.value)}`
-    const [docs, jobs] = await Promise.allSettled([
-      axios.get(`${base}/documents`),
-      axios.get('/api/v1/jobs', { params: { unit_id: id.value, limit: 20 } }),
-    ])
-    if (docs.status === 'fulfilled') indexDocs.value = docs.value.data || []
-    if (jobs.status === 'fulfilled') unitJobs.value = jobs.value.data?.items || []
+    // 文档列表由 DocumentExplorer 自己取（带搜索/分页/状态筛选），
+    // 这里只负责「任务进度」这块，避免同一份数据在页面里取两遍。
+    const jobs = await axios.get('/api/v1/jobs', { params: { unit_id: id.value, limit: 20 } })
+    unitJobs.value = jobs.data?.items || []
     // 任务刚结束时刷新画像里的文本块计数。
     if (hadActive && activeJobs.value.length === 0) await refreshProfile()
   } finally {
@@ -817,19 +730,10 @@ async function retryIndexJob(jobId: string) {
   }
 }
 
-// 删除项目内文档：同时移除已索引向量、documents 记录与源文件。
-async function removeDoc(row: IndexDoc) {
-  if (!window.confirm(`确定删除「${row.filename}」？已索引的向量、片段和源文件都会被移除。`)) return
-  try {
-    await axios.delete(
-      `/api/v1/units/${encodeURIComponent(id.value)}/documents/${encodeURIComponent(row.filename)}`,
-    )
-    ElMessage.success('文档已删除')
-    await loadDocuments()
-    await refreshProfile()
-  } catch (e: any) {
-    ElMessage.error(e.response?.data?.error || '删除失败')
-  }
+
+// 文档被移除或重新索引后，刷新画像统计与任务列表。
+async function refreshAfterDocChange() {
+  await Promise.all([refreshProfile(), loadDocuments()])
 }
 
 async function refreshProfile() {
@@ -841,11 +745,6 @@ async function refreshProfile() {
   }
 }
 
-function formatDate(value?: string) {
-  if (!value) return ''
-  const date = new Date(value)
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString('zh-CN')
-}
 
 async function load() {
   if (!id.value) return
@@ -1564,7 +1463,6 @@ watch([highConfidenceOnly, hideLeaves, graphKeyword, graphKindFilter], () => {
 })
 
 watch(id, async () => {
-  indexDocs.value = []
   unitJobs.value = []
   // 从文档库跳到另一个知识库时，tab 与文档过滤都跟着 query 走。
   if (route.query.tab === 'graph') tab.value = 'graph'
