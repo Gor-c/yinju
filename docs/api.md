@@ -47,7 +47,7 @@
 | GET | `/api/v1/units/:id/documents` | 知识库关联文档列表（含 `doc_id`） |
 | GET | `/api/v1/units/:id/documents/:filename/chunks` | 查看文档已入库的分块内容 |
 | GET | `/api/v1/units/:id/documents/:filename/source` | 查看从上传源文件提取的完整文本 |
-| DELETE | `/api/v1/units/:id/documents/:filename` | 从知识库移除文档；无其他引用时清理向量与源文件 |
+| DELETE | `/api/v1/units/:id/documents/:filename` | 从知识库移除文档；无其他引用时清理向量与源文件（加 `?detach_only=1` 则只解绑） |
 | POST | `/api/v1/units/:id/web-import` | 抓取公开网页正文并作为文档排队索引 |
 | POST | `/api/v1/upload` | 上传文档并启动索引任务 |
 | GET | `/api/v1/jobs` | 最近索引任务列表（支持状态过滤） |
@@ -327,6 +327,14 @@ curl '/api/v1/units/unit-xxx/graph?source=entity&doc_id=doc-7a6bfb6fad948db6'
 ```
 
 `filename` 需 URL 编码，且只能是 `filepath.Base` 形式（不含路径分隔符）。不存在的文档返回 404。
+
+**加 `?detach_only=1` 表示只解除绑定**：不清理向量、`documents` 记录与源文件，文档会变成「未关联任何知识库」的孤儿，仍能在文档库中看到并可重新绑定。响应里 `detached_only: true`、`fully_removed: false`：
+
+```json
+{"unit_id":"demo-001","filename":"合规.md","doc_id":"doc-d354...","deleted":true,"fully_removed":false,"detached_only":true}
+```
+
+知识库详情页的「从本库移除」用的就是这个参数——那里管理的是绑定关系，不该因为某个库解绑就销毁全局资产。文档库页的「删除」才走彻底删除（`DELETE /api/v1/documents/:doc_id`）。
 
 ### 文档库
 
