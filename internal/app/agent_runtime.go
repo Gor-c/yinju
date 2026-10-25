@@ -51,6 +51,10 @@ type agentChatRequest struct {
 
 type agentAnswer struct {
 	Answer         string
+	// Expert 是本次**实际生效**的专家 ID：请求没指定时会由项目配置回填。
+	// 必须走返回值带出去——runAgent 是按值接收请求的，内部回填的 in.Expert
+	// 传不回调用方，否则响应里会出现「用了专家但字段为空」。
+	Expert         string
 	Skills         []string
 	Citations      []citation
 	Steps          int
@@ -173,6 +177,7 @@ func (s *Server) runAgent(ctx context.Context, in agentChatRequest, runID string
 		s.scheduleMemoryCompaction(in.ConversationID)
 		return agentAnswer{
 			Answer:         answer,
+			Expert:         in.Expert,
 			Skills:         skillIDs,
 			Citations:      []citation{},
 			Steps:          1,
@@ -183,6 +188,7 @@ func (s *Server) runAgent(ctx context.Context, in agentChatRequest, runID string
 	collector := &citationCollector{}
 	registry := s.agentRegistry(ctx, unitIDs, unitNames, collector, s.effectiveTools(in.Expert, skillIDs, declaredTools), in.WebSearch)
 	answer, err := s.runAgentLoop(ctx, in, runID, messages, client, registry, collector, skillIDs, emit)
+	answer.Expert = in.Expert
 	if err == nil {
 		// 问答的价值不只在当次回答：把有依据的问答沉淀为候选草稿，
 		// 由「知识沉淀」页审核后才会进入知识库，形成闭环。

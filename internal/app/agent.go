@@ -321,7 +321,7 @@ func (s *Server) chat(c *gin.Context) {
 	)
 	c.JSON(http.StatusOK, gin.H{
 		"answer":          answer.Answer,
-		"expert":          in.Expert,
+		"expert":          answer.Expert,
 		"skills":          answer.Skills,
 		"citations":       answer.Citations,
 		"run_id":          runID,
