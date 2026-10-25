@@ -66,7 +66,7 @@ embedding 和 chat 都使用 OpenAI-compatible API，可在前端「设置 > 模
 
 项目详情的“文档索引”页可分别查看源文件提取的完整文本和向量库中的索引片段；PDF 与 DOCX 使用索引时相同的解析流程。
 
-Agent UI 的专家/技能/连接器描述可用 `AGENT_EXPERTS_JSON`、`AGENT_SKILLS_JSON`、`MCP_CONNECTORS_JSON` 提供；也可以在「设置 > Agent 与技能」中上传 JSON 或 Markdown 定义，上传项覆盖同 id 的内置项。设置页还包含「模型服务」和「联网搜索」分类；旧的 `/agents` 地址会重定向到 Agent 与技能设置页。每个项目可绑定一个 Agent 和若干技能，对话页选择项目后自动套用，并按技能声明的 `tools`（Agent 作为上限）带出可用工具。内置 Agent 选择项目后会进入只读工具循环（项目画像、隐患、审核、向量检索，最多 `AGENT_MAX_STEPS` 步），并通过 `/api/v1/agent/stream` 以 SSE 流式返回；`/api/v1/agent/chat` 保留为非流式兼容接口。每次运行写入 `agent_runs`，每个工具调用写入 `agent_steps`；服务启动时仅将超过 Agent 最大运行时限的陈旧 `running` 运行标记为 `interrupted`。外部 connector 目前仍只展示，不参与内置 Agent 调用。
+Agent UI 的专家/技能/连接器描述可用 `AGENT_EXPERTS_JSON`、`AGENT_SKILLS_JSON`、`MCP_CONNECTORS_JSON` 提供；也可以在「设置 > Agent 与技能」中上传 JSON 或 Markdown 定义，上传项覆盖同 id 的内置项。设置页还包含「模型服务」和「联网搜索」分类；旧的 `/agents` 地址会重定向到 Agent 与技能设置页。每个项目可绑定一个 Agent 和若干技能，对话页选择项目后自动套用，并按技能声明的 `tools`（Agent 作为上限）带出可用工具。内置 Agent 选择项目后会进入只读工具循环（项目画像、隐患、审核、向量检索，最多 `AGENT_MAX_STEPS` 步），并通过 `/api/v1/agent/stream` 以 SSE 流式返回；`/api/v1/agent/chat` 保留为非流式兼容接口。每次运行写入 `agent_runs`，每个工具调用写入 `agent_steps`；服务启动时仅将超过 Agent 最大运行时限的陈旧 `running` 运行标记为 `interrupted`。外部 connector 目前仍只展示，不参与内置 Agent 调用。对话页的示例问题、覆盖章节与「继续追问」**只把问题填进输入框**，按回车或点发送才开始处理（`/agent?q=` 深链同样只预填），避免误触直接消耗一次模型调用。
 
 联网搜索为可选能力：服务端开启 `WEB_SEARCH_ENABLED` 并配置 `WEB_SEARCH_PROVIDER`（tavily / bocha / brave）与 API Key 后，Agent 会多出 `web_search` 工具，但仍需用户在本轮对话勾选「联网搜索」才会启用。搜索关键词会离开本机，因此默认关闭；网页来源在引用中单独标记为「网页来源」，与已入库档案区分，且结果会作为不可信内容回传给模型（网页中的指令不执行）。支持站点白/黑名单、结果缓存和调用超时。**配置可在「设置」页完成**（`web_search_settings` 单行表，优先于环境变量，保存即生效，密钥掩码回显），并可一键测试搜索连通性。
 

@@ -508,6 +508,7 @@ erDiagram
 | 能力 | 联网搜索 | `/settings/web-search` | 搜索服务、站点范围与缓存限制 | 保存即生效 |
 | 检索与记忆 | 检索参数 | `/settings/retrieval` | 召回、两道闸门、切块、记忆窗口 | 保存即生效 |
 | 检索与记忆 | 记忆与上下文 | `/settings/memory` | 摘要、约束事实、滑出窗口的消息 | 只读 + 可重建 |
+| 检索与记忆 | 知识沉淀 | `/settings/drafts` | 问答候选、整理成笔记、采纳入库 | 采纳后进入索引队列 |
 | 扩展 | Agent 与技能 | `/settings/agents` | 上传与管理 Agent、技能定义 | 保存即生效 |
 | 部署 | 实例配置 | `/settings/instance` | 数据库、向量库、监听地址、数据目录 | **需重启** |
 
@@ -777,6 +778,13 @@ POST /api/v1/upload
 - 不把密钥、真实档案、个人信息写入日志、前端 bundle、示例配置或 connector zip。
 - 新增功能需补充自动化测试。仓库现有单元测试覆盖切块、文档提取、上传校验、任务状态、Agent 工具循环/并行顺序/最大步数/空回答、向量工具预算与引用对齐、OpenAI 流式解析/非流式回退、MCP 鉴权/协议以及 Chroma adapter（基于 httptest 的伪服务）；数据库查询路径仍以集成测试为主，需在真实 PostgreSQL 上补充覆盖。
 
+前端（Vue 3 + Element Plus）四条约定，都是踩过才写下来的：
+
+- **文档列表不要再复制一份。** 统一用 `frontend/src/components/DocumentExplorer.vue`，数据源是 `/documents`（支持 `q` / `state` / 分页），行为由两个 prop 决定：`scope="unit"` 走「只解绑」（`?detach_only=1`，不动全局文档与向量），`scope="global"` 走彻底删除；`previewMode="emit"` 把预览交回父页面（详情页的预览带全文检索与高亮，组件内建的 iframe 做不到）。确认文案必须跟着 `scope` 变——说错一句就会让人以为删掉了别的库还在用的文档。
+- **`el-dialog` / `el-drawer` 上的 class 挂在组件根元素自身。** 组件本体的样式要用复合选择器 `.source-dialog.el-dialog`；写成后代选择器 `.source-dialog .el-dialog` 永远匹配不到（三处弹窗的 `max-height` 都因此静默失效，长内容直接压到页脚上）。`__body` / `__footer` 这类子元素才用后代选择器。
+- **弹窗里只留一个滚动容器。** `el-dialog__body` 默认 `display: block`，里面的 `flex: 1` 不生效；要滚就得把 body 改成 flex 列、逐层 `min-height: 0`，并用 `flex: 1 1 auto` 而不是 `1 1 0`（对话框高度由内容撑起，基准设 0 会让弹窗塌成一条）。
+- **点一下就发送要克制。** 示例问题、章节、追问都只把文字填进输入框（`fillComposer`），发不发送由用户决定；`/agent?q=` 深链同理。误触不该消耗一次模型调用，用户也常常要先补一句限定条件。
+
 ```sh
 go test ./...
 go vet ./...
@@ -824,3 +832,11 @@ CHROMA_URL=http://localhost:8000 CHROMA_INTEGRATION_TEST=1 go test ./internal/ve
 基础功能补齐（2026-10-25）：单库 `GET`/`DELETE`（删库只解绑、不删全局文档，见 [api.md](api.md) 的删除语义）、文档库服务端分页与 `state` 筛选、前端 404 兜底、错误体带 `request_id`、`/health` 带构建版本、`/ask` 与 `/retrieve` 参数统一为 `unit_ids` 且引用编号由服务端分配。知识库资源查询已收敛为 `unitSelectSQL` + `unitPayload`，列表与详情共用，新增展示字段只改一处。
 
 **知识沉淀闭环（2026-10-25）**：问答不再只用于拼接 prompt。`runAgent` 成功后把「有文档依据的回答」异步写成 `kb_drafts` 候选（`content_hash` 去重，纯网页答案与拒答不沉淀）；每小时检查一次，待审核问答满 8 条自动整理成主题笔记（`kind=note`，原问答标 `merged`）；**只有人工采纳才会写入知识库**——采纳时生成 Markdown 并复用现有 `index_jobs` 队列，切块、嵌入、向量身份、章节抽取与普通上传完全一致。未采纳的草稿不参与检索，避免模型输出自我强化。详见 [api.md](api.md) 的知识沉淀一节。
+
+**前端交互与布局（2026-10-25）**：
+
+- 文档列表抽成共用组件 `DocumentExplorer`，知识库详情与文档库用同一份实现，差异由 `scope`（移除绑定 / 彻底删除）和 `previewMode`（内建 iframe / 交回父页面）承接；详情页因此删掉了重复的表格、片段抽屉与删除逻辑（约 200 行）。
+- 文档移除新增 `?detach_only=1`：知识库详情页管的是**绑定关系**，不应因为某个库解绑就销毁全局文档与向量。语义与响应字段见 [api.md](api.md) 的「删除文档」。
+- 索引片段修正两处：接口返回的是 `chunks` / `chunk_count` / `has_more`（原按 `items` / `total` 读，点开抽屉直接抛错）；序号统一为 1-based（后端 `index` 是 0-based）。
+- 预览弹窗两处叠加的布局问题：对话框 class 必须写成复合选择器 `.source-dialog.el-dialog` 才拿得到 `max-height`；`el-dialog__body` 要显式改成 flex 列容器并逐层 `min-height: 0`，长文档才会在弹窗内滚动，而不是压到页脚按钮上。
+- 对话页的示例问题、章节与追问改为「只填入、不代发」，`/agent?q=` 深链同理。
