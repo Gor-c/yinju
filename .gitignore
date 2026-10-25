@@ -30,3 +30,6 @@ tmp/
 .pnpm-store/
 *.log
 .DS_Store
+
+# 旧的连接器打包产物（内部项目名，且与 knowledge-base-connector/ 重复）
+workbuddy/*.zip
