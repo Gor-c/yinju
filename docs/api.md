@@ -7,7 +7,7 @@
 - 默认 HTTP 地址：`http://localhost:8080`。
 - 业务 API 前缀：`/api/v1`。
 - JSON 请求使用 `Content-Type: application/json`；上传除外。
-- 成功响应为 JSON；常见错误格式为 `{"error":"错误信息"}`。500 只返回 `{"error":"internal server error"}`，具体原因记录在服务端 `error.log`。
+- 成功响应为 JSON；常见错误格式为 `{"error":"错误信息","request_id":"…"}`。500 只返回 `{"error":"internal server error","request_id":"…"}`，具体原因记录在服务端 `error.log`，用 `request_id` 可以把用户报错与日志对齐。
 - 未知路径：以 `/api/` 开头但未匹配的请求返回 404 `{"error":"API not found","started_at":"2026-01-01T00:00:00Z"}`；`started_at` 是该后端进程的启动时间，用于判断请求是否打到了未重新构建的旧进程。非 `/api/` 路径一律返回前端 `index.html`（SPA 路由，如 `/settings/web-search`）。
 - 所有响应带 `X-Request-ID`；请求可自带同名头（≤64 字符），服务端透传，否则生成 16 位十六进制 ID。
 - 项目级查询均以 `unit_id` 为数据范围。当前没有用户登录和项目授权机制。
@@ -19,10 +19,11 @@
 响应：
 
 ```json
-{"status":"ok","database":true}
+{"status":"ok","database":true,"version":"0b33d40+dirty"}
 ```
 
 `database` 表示进程是否配置并创建了数据库连接池，不是实时数据库探活结果。
+`version` 来自 Go 构建信息里的 `vcs.revision`（取前 7 位），工作区有未提交改动时追加 `+dirty`；不在 git 仓库中构建时返回 `dev`。它不需要额外的构建参数，用于判断「当前进程跑的是不是最新代码」。
 
 ## 3. 业务 API
 
@@ -33,12 +34,14 @@
 | GET | `/api/v1/units/profiles?ids=a,b` | 批量读取项目画像（对话页多选知识库） |
 | POST | `/api/v1/units` | 新建项目 |
 | PATCH | `/api/v1/units/:id` | 编辑项目名称、分类、行业与 Agent/技能绑定 |
+| GET | `/api/v1/units/:id` | 单个项目详情（字段与列表项一致，含 `created_at`） |
+| DELETE | `/api/v1/units/:id` | 删除项目，仅解除文档绑定，不删除全局文档与向量 |
 | GET | `/api/v1/units/:id/agent-config` | 项目绑定的 Agent、技能与生效工具 |
 | GET | `/api/v1/units/:id/graph` | 本地知识关联图谱（项目 → 标签/分类/行业/类型 → 文档） |
 | GET | `/api/v1/units/:id/profile` | 项目摘要和计数 |
 | GET | `/api/v1/units/:id/hazards?status=` | 项目隐患，可按状态精确过滤 |
 | GET | `/api/v1/units/:id/audits` | 项目审核历史，按时间倒序 |
-| GET | `/api/v1/documents?q=&unit_id=&limit=&offset=` | 文档库列表（跨知识库，带引用关系） |
+| GET | `/api/v1/documents?q=&unit_id=&state=&limit=&offset=` | 文档库列表（跨知识库，带引用关系；`state` 可为 `indexed`/`failed`） |
 | GET | `/api/v1/documents/:doc_id` | 文档详情与引用它的知识库 |
 | DELETE | `/api/v1/documents/:doc_id` | 彻底删除文档（解除全部关联 + 向量 + 源文件） |
 | GET | `/api/v1/units/:id/documents` | 知识库关联文档列表（含 `doc_id`） |
@@ -129,6 +132,24 @@
 ```json
 {"categories":["重点项目","专项项目"],"industries":["制造业","市政"]}
 ```
+
+### 读取与删除项目
+
+`GET /api/v1/units/:id` 返回单个项目。查询与列表共用同一份 SQL（`unitSelectSQL`），所以字段与 `/api/v1/units` 的列表项**完全一致**（含 `document_count`、`chunk_count`、`chapter_count`、`chapters`、`doc_names`、`doc_types`），另带 `created_at`。项目不存在返回 404。
+
+`DELETE /api/v1/units/:id` 删除项目本身，**不删除文档**：
+
+- 随库级联删除：`document_units` 的绑定关系、`index_jobs`、`hazards`、`audit_records`、`kg_entities` / `kg_relations` / `kg_jobs`。
+- 保留：`documents`、片段、向量库、`doc_outlines`。它们是全局实体，同一份文档可能被多个项目引用；解绑后的文档仍可在「文档库」中看到（未关联任何知识库），可重新绑定或单独删除。
+- 会话里残留的项目引用不清空，检索时已验证返回空结果而不是报错。
+
+响应：
+
+```json
+{"deleted":true,"unit_id":"unit-xxx","documents_detached":2}
+```
+
+`documents_detached` 表示本次解除了多少份文档的绑定，前端用它提示「文档去哪了」。重复删除返回 404。
 
 ### 项目 Agent 配置
 
@@ -331,7 +352,9 @@ curl '/api/v1/units/unit-xxx/graph?source=entity&doc_id=doc-7a6bfb6fad948db6'
 
 - 列表同时包含**已索引文档**（`state=indexed`）和**索引失败的任务**（`state=failed`，带 `phase` 与 `job_id`）。失败项可直接调用 `POST /api/v1/jobs/:job_id/retry` 重试，或上传新文件覆盖。
 - `q` 按文件名模糊搜索（`ILIKE`）；`unit_id` 只看某个知识库关联的文档。
-- `total` 是两类之和；`failed` 是失败任务数；`chunks`/`orphans` 只统计已索引文档。
+- `state`（可选）在**服务端**过滤：`indexed` 只返回已索引文档、`failed` 只返回失败任务，其他值返回 400。筛选必须落在服务端，否则分页之后前端只能筛当前页，看起来就像「失败文档消失了」。
+- 分页用 `limit`（默认 50，上限 200）+ `offset`。`total` 随 `state` 变化：全部时是两类之和，筛选时是对应一类的总数，可以直接驱动分页控件。
+- `failed` 是失败任务**总数**（独立 count 查询，不受页大小影响）；`chunks`/`orphans` 只统计已索引文档。响应另带 `state` 回显。
 - `DELETE /api/v1/documents/:doc_id` 不受知识库范围限制：删除全部 `document_units` 关联，并清理向量与源文件（文件仍被其他记录引用时保留）。
 - 只读列表外的操作（查看片段、源文件）仍走 `/units/:id/documents/:filename/...`，用 `units[0]` 作为上下文即可。
 - 「文档库」页的「索引片段」抽屉即调用 `GET /units/:id/documents/:filename/chunks`（`units[0].unit_id` + `filename`），分页 10 条，仅在 `state=indexed` 时可用；失败项没有片段，只能重试任务。
@@ -343,27 +366,31 @@ curl '/api/v1/units/unit-xxx/graph?source=entity&doc_id=doc-7a6bfb6fad948db6'
 请求：
 
 ```json
-{"unit_id":"demo-001","question":"最近一次检查发现了什么问题？","top_k":5}
+{"unit_ids":["demo-001"],"question":"最近一次检查发现了什么问题？","top_k":5}
 ```
 
-`top_k` 范围为 1–20；不在范围内时使用 5。`question` 上限 8000 字符；`unit_id` 不存在返回 404。响应：
+`unit_ids` 为数组，可跨项目提问；也兼容单值 `unit_id`（与 `/retrieve` 同一套参数约定）。`top_k` 范围为 1–20；不在范围内时使用 5。`question` 上限 8000 字符；任一 `unit_id` 不存在返回 404。响应：
 
 ```json
 {
-  "answer": "牵引力不得超过光缆允许张力的 80%……（1企业管理制度.docx）",
+  "answer": "牵引力不得超过光缆允许张力的 80%[1]。",
+  "unit_ids": ["demo-001"],
   "citations": [
     {
       "source_type": "document", "unit_id": "unit-9ea2...", "unit_name": "公司入围模版",
       "doc_id": "doc-7a6bfb6fad948db6", "filename": "1企业管理制度（定稿·排版校订版）.docx",
-      "doc_type": "制度", "chunk_index": 3, "content": "……", "distance": 0.34, "score": 0.846
+      "doc_type": "制度", "chunk_index": 3, "content": "……", "distance": 0.34, "score": 0.846,
+      "index": 1
     }
   ]
 }
 ```
 
+- **引用编号由服务端分配**：`citations[i].index` 从 1 开始，与资料块里的 `[n]` 标记一一对应；模型只能引用这些编号，不能自己数。与 Agent 的 `index` 字段语义一致。
+- 文档是全局实体，只有单项目提问时才在 `citations[].unit_id` 标注来源项目，跨项目时该字段省略。
 - `chunk_index` 是片段在文档内的序号，前端据此定位原文；`doc_id` 用于跨知识库共享的文档。
 - `distance` 是向量余弦距离（越小越相似），`score` 是重排分（0–1，越大越相关）。两者量纲不同，不要互相比较。
-- 没有片段达到阈值时返回 `{"answer": "...没有检索到...", "citations": [], "no_evidence": true}`，不再调用大模型，避免编造。
+- 没有片段达到阈值时返回 `{"answer": "...没有检索到...", "citations": [], "no_evidence": true, "unit_ids": [...]}`，不再调用大模型，避免编造。
 
 ### 检索链路（混合检索 + 重排 + 双层拒答）
 

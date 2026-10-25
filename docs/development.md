@@ -4,64 +4,107 @@
 
 ### 1.1 系统架构图
 
+三张图分开画：**包与依赖**、**两条链路**、**记忆注入**。合并成一张会把三个不同维度的信息压在同一平面上，反而看不出重点。图里只画已上线的通路，未接线的扩展点在 [1.1.1](#111-分层与扩展点) 说明。
+
+#### 总览：包边界与依赖方向
+
+依赖是单向的：`app → rag → vectorstore`、`app → agent`。这个方向的收益是替换成本，不是好看——详见 1.1.1。
+
+```mermaid
+flowchart TB
+    subgraph clients["使用方"]
+        Browser["浏览器 · Vue 3"]
+        Host["WorkBuddy / 外部 Agent"]
+    end
+
+    subgraph svc["Go 服务 · 单二进制"]
+        subgraph app["internal/app 装配层"]
+            API["Gin /api/v1"]
+            MCP["MCP endpoint /mcp"]
+            Worker["索引 Worker"]
+            Runtime["Agent 运行时 · SSE"]
+            Cfg["配置与留痕"]
+        end
+        subgraph core["核心层"]
+            Pipe["rag.Pipeline"]
+            Loop["agent.Loop + Catalog"]
+        end
+        VS["vectorstore.Store"]
+    end
+
+    subgraph ext["存储与模型"]
+        PG[("PostgreSQL")]
+        Vec[("Chroma / pgvector")]
+        Model["对话 / 嵌入 / 重排"]
+        Files[("原件 · 图标 · instance.env")]
+    end
+
+    Browser --> API
+    Host --> MCP
+    API --> Worker
+    API --> Runtime
+    API --> Cfg
+    Runtime --> Loop
+    Loop --> Pipe
+    Pipe --> VS
+    VS --> Vec
+    Pipe --> PG
+    Pipe --> Model
+    Loop --> Model
+    Worker --> Pipe
+    Worker --> PG
+    Worker --> Files
+    Cfg --> PG
+```
+
+#### 两条链路：入库与问答共用一套嵌入与身份
+
+两条链路看起来是两件事，实际上共用同一个 `Embedder` 与同一份身份三元组（`embedding_model / embedding_dim / chunker`）。这是整套分层里**唯一的硬约束**：一旦两侧不一致，检索到的向量就不在同一个空间里，而系统不会报错，只会慢慢变差。
+
 ```mermaid
 flowchart LR
-    subgraph clients[使用方]
-        Browser[浏览器 / Vue 3]
-        MCPHost[WorkBuddy / MCP Host]
+    subgraph ingest["入库链路 · 离线、可重建"]
+        direction LR
+        U["上传 / 网页导入"] --> P["解析 · 切块 1800/240"]
+        P --> E["嵌入"]
+        E --> W[("向量库")]
+        P --> O[("doc_outlines")]
     end
 
-    subgraph service[知识库服务 Go]
-        HTTP[Gin HTTP API]
-        UI[静态前端]
-        Upload[上传 API]
-        Worker[索引 Worker]
-        Pipeline[rag.Pipeline]
-        Memory[会话记忆]
-        Agent[Agent Runtime / SSE]
-        Tools[Tool Registry]
-        MCP[MCP endpoint]
-        VS[vectorstore.Store]
+    subgraph ask["问答链路 · 在线"]
+        direction LR
+        Q["提问"] --> R1["向量召回"]
+        Q --> R2["关键词召回 pg_trgm"]
+        R1 --> F["RRF 融合"]
+        R2 --> F
+        F --> RR["精排 + 分数阈值"]
+        RR --> G["覆盖率闸门"]
+        G --> C["注入上下文 · 服务端编号"]
+        G -.->|"全空"| N["拒答：资料未提及"]
     end
 
-    subgraph data[存储与模型]
-        PG[(PostgreSQL)]
-        Files[(上传与图标目录)]
-        Vec[(Chroma 或 pgvector)]
-        Model[模型服务]
-        Boot[(instance.env)]
-    end
-
-    Browser -->|静态页面| UI
-    Browser -->|/api/v1/*| HTTP
-    HTTP --> Upload
-    Upload -->|原件| Files
-    Upload -->|index_jobs| PG
-    HTTP --> Worker
-    Worker -->|SKIP LOCKED| PG
-    Worker -->|切块 / 嵌入| Pipeline
-    Worker -->|向量| VS
-    Worker -->|章节结构| PG
-
-    HTTP -->|/retrieve /ask| Pipeline
-    Pipeline -->|向量召回| VS
-    Pipeline -->|关键词召回 pg_trgm| PG
-    Pipeline -->|embed / rerank| Model
-    VS --> Vec
-
-    HTTP --> Agent
-    Agent --> Tools
-    Tools -->|按 doc_id 检索| Pipeline
-    Agent -->|窗口 / 摘要 / 事实| Memory
-    Memory --> PG
-    Agent -->|chat completions| Model
-
-    HTTP --> MCP
-    MCPHost -->|Bearer Token| MCP
-    MCP --> Tools
-
-    Boot -.->|启动时加载，决定连谁| HTTP
+    E -.->|"同一 Embedder、同一身份"| R1
 ```
+
+召回只有 `vector` 与 `keyword` 两路。知识图谱（`/units/:id/graph`）是另一条独立抽取管线，产物用于浏览与排查，**不参与检索**；联网搜索是工具，也不是召回通道。这两点容易被误当成"第三路召回"。
+
+#### 记忆注入：只改上下文，不改证据
+
+```mermaid
+flowchart LR
+    L1["L1 窗口原文"] -->|"滑出后异步压缩"| L2["L2 滚动摘要 summary_upto"]
+    L2 -->|"同一次调用产出"| L3["L3 原子事实 topic/active"]
+    L1 --> M["记忆块 · 只用于理解上下文"]
+    L2 --> M
+    L3 --> M
+    M --> P["prompt"]
+    R["检索片段 1..n · 服务端分配编号"] --> P
+    P --> X["模型"]
+```
+
+记忆块在 system prompt 的 10 条工具规则**之后**单独成块追加，理由写在 `agent_runtime.go` 的注释里：它既有要遵守的约束，也有不能当证据的摘要，两者必须让模型分得清。**摘要与事实永远不带引用编号。**
+
+三张图之外，还有几条贯穿全局、画不进图里的约定：
 
 `vectorstore.Store` 是向量库替换边界（pgvector / Chroma v2）。文档是独立实体：`documents(doc_id)` + `document_units(doc_id, unit_id)` 表达「一份文档可被多个知识库引用」，向量只按 `doc_id` 存一份。检索时先把知识库集合翻译成 `doc_id` 集合，再过滤向量库。模型配置支持多来源（`model_providers` + `model_selection`），**对话、向量、重排**三个角色可分别指向不同端点（本地 Ollama 或云端）；重排未单独配置时跟随对话来源。内置 Agent 与 MCP 复用同一组工具实现，但分别走 `/agent/*` 与 `/mcp`。
 
@@ -70,6 +113,15 @@ flowchart LR
 - **检索是一条独立的流水线**（`rag.Pipeline`）。上传侧的嵌入与检索侧的查询向量走的是同一个 `Embedder`、同一份 `Identity`（模型 + 维度）；两者不一致会直接拒绝检索，而不是让两套向量静默混算。
 - **会话记忆不参与检索**。它只在组装 prompt 时注入，作用是「别忘掉用户说过什么」；摘要与事实被明确标注为不可作为回答依据，也不进引用编号。
 - **配置分两条通道**：数据库里的随保存生效，`instance.env` 里的要重启（且 `PG_DSN` 这类引导期配置只能放文件，否则改错就再也打不开页面）。见 [1.1.2](#112-配置的两条通道)。
+
+图外还有四条已上线但没画进来的通路，它们都在 `internal/app` 里，画进去会让总览失焦：
+
+| 通路 | 入口 | 说明 |
+|---|---|---|
+| 内容框架 / 目录树 | `/units/:id/{outline,tree,examples}` | 从切块反推章节结构，规则版本落 `doc_outlines` |
+| 知识图谱 | `/units/:id/graph`、`/kg/extract` | 独立抽取，用于浏览；不进检索 |
+| 联网搜索 | 工具 `web_search` | 仅在知识库无答案时用，出处另计 |
+| 评测 | `cmd/eval` + `eval/questions.json` | 离线跑，不进服务进程 |
 
 ### 1.1.1 分层与扩展点
 
@@ -91,13 +143,13 @@ flowchart LR
 | `rag.Reranker` | `Rerank(query, docs) ([]float64, error)` | 换精排模型 | `httpReranker` → `/rerank` |
 | `rag.Chunker` | `Chunk(text) []Chunk` | 换切块策略（按段落、按条款） | `FixedChunker`（1800 / 240） |
 
-加一路召回不改编排逻辑，在 `internal/app/retrieval.go` 的 `Channels` 里 append 一项即可：
+加一路召回不改编排逻辑，在 `internal/app/retrieval.go` 的 `Channels` 里 append 一项即可。下面是**示意**：`graph` 这一路目前还没有接线（知识图谱是独立抽取产物，见 [1.1](#11-系统架构图)），`s.graphSearch` 需要自行实现，签名可参照 `s.keywordSearch`。
 
 ```go
 {
     Name: "graph",
     Fetch: func(ctx context.Context, req rag.Request) ([]rag.Match, error) {
-        return s.graphSearch(ctx, req.DocIDs, req.Query)
+        return s.graphSearch(ctx, req.DocIDs, req.Query, tuning.KeywordK)
     },
 },
 ```
@@ -766,3 +818,5 @@ CHROMA_URL=http://localhost:8000 CHROMA_INTEGRATION_TEST=1 go test ./internal/ve
 ### 10.5 已经做完、不必再列进 TODO 的
 
 早期文档里这几条已经实现，留个说明避免重复投入：hybrid 检索（向量 + pg_trgm，RRF 融合）、cross-encoder 精排、双层拒答（阈值 + 二元组覆盖率闸门）、内联引用角标、检索分层留痕、Agent 工具循环与并发执行、持久化索引队列、内容框架与目录树、示例问题生成与验证、三层会话记忆与事实冲突消解、品牌与外观模板、实例配置页与回滚。
+
+基础功能补齐（2026-10-25）：单库 `GET`/`DELETE`（删库只解绑、不删全局文档，见 [api.md](api.md) 的删除语义）、文档库服务端分页与 `state` 筛选、前端 404 兜底、错误体带 `request_id`、`/health` 带构建版本、`/ask` 与 `/retrieve` 参数统一为 `unit_ids` 且引用编号由服务端分配。知识库资源查询已收敛为 `unitSelectSQL` + `unitPayload`，列表与详情共用，新增展示字段只改一处。
