@@ -250,6 +250,15 @@ func (s *Server) unitOutline(c *gin.Context) {
 		fail(c, err)
 		return
 	}
+	// origin=original：只要原始文档。对话页的「覆盖章节」是快捷提问，
+	// 不该出现沉淀文档的章节标题；内容框架/目录树要看全量，所以由调用方选。
+	if c.Query("origin") == "original" {
+		docIDs, err = s.originalDocIDs(c, docIDs)
+		if err != nil {
+			fail(c, err)
+			return
+		}
+	}
 	if len(docIDs) == 0 {
 		c.JSON(http.StatusOK, gin.H{"documents": []any{}, "total": 0})
 		return

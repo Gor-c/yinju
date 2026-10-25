@@ -171,6 +171,33 @@ func (s *Server) docIDsForUnits(ctx context.Context, unitIDs []string) ([]string
 	return ids, err
 }
 
+// originalDocIDs 去掉问答沉淀文档（doc_type=问答沉淀）。
+//
+// 沉淀文档是「某一轮问答的转述」，不是原始档案。拿它出示例问题等于
+// 「用系统自己写的笔记考系统」：问题里会出现《主题笔记：由 2 条历史问答整理》
+// 这种没人问得出口的标题，验证环节也会被自己写的答案「通过」。
+// 示例问题与「覆盖章节」都走这里；内容框架（目录树）不走，那里只是展示。
+func (s *Server) originalDocIDs(ctx context.Context, docIDs []string) ([]string, error) {
+	if len(docIDs) == 0 {
+		return nil, nil
+	}
+	rows, err := s.db.Query(ctx, `SELECT doc_id FROM documents
+		WHERE doc_id = ANY($1) AND COALESCE(doc_type, '') <> $2`, docIDs, kbDraftDocType)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]string, 0, len(docIDs))
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 // docIDsForUnitsWithOwner 同时返回每份文档的归属知识库（取传入顺序中第一个），
 // 用于给跨知识库的检索结果标注来源。
 func (s *Server) docIDsForUnitsWithOwner(ctx context.Context, unitIDs []string) ([]string, map[string]string, error) {

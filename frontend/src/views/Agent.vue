@@ -739,8 +739,10 @@ watch(
     examplesLoading.value = true
 
     // 章节与示例并行：示例要跑真实检索，慢得多，不该拖住章节展示。
+    // origin=original 排除问答沉淀文档——这里的章节会变成快捷提问，
+    // 不能让人去问「《主题笔记：由 2 条历史问答整理》讲了什么」。
     axios
-      .get(`/api/v1/units/${profile.unit_id}/outline`, { timeout: 20000 })
+      .get(`/api/v1/units/${profile.unit_id}/outline`, { params: { origin: 'original' }, timeout: 20000 })
       .then(({ data }) => {
         if (seq !== profileDigestSeq) return
         outlineTotal.value = data.total || 0

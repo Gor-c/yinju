@@ -662,7 +662,7 @@ Content-Type: application/json
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| `GET` | `/units/:id/outline` | 该知识库下所有文档的章节结构 |
+| `GET` | `/units/:id/outline` | 该知识库下所有文档的章节结构；`?origin=original` 只要原始文档 |
 | `POST` | `/units/:id/outline/extract` | 强制重抽（索引完成时会自动抽一次） |
 | `GET` | `/units/:id/examples` | 示例问题，**每条都经过真实检索验证** |
 | `GET` | `/units/:id/tree` | 目录树：文档 → 章节 → 片段预览 |
@@ -683,6 +683,8 @@ Content-Type: application/json
 `level` 是层级：1 章、2/3 条。抽取规则见 `outlineRuleVersion`，改规则要同步升版本号，否则老文档不会重抽。
 
 `examples` 的参数 `limit`（默认 4）。每条带 `validated: true`——生成时会用**当前检索参数**实跑一次，`no_evidence` 的直接丢弃。所以示例数量可能少于 `limit`，也可能为空（文档太短或结构太弱）。
+
+**示例问题只从原始文档出题**：`doc_type=问答沉淀` 的文档会被排除（出题与验证两步都排除）。它们是某一轮问答的转述，拿它出题会出现「《主题笔记：由 2 条历史问答整理》主要讲了什么」，验证也会被自己写的答案「通过」。对话页的「覆盖章节」同理，请求 `/outline?origin=original`；内容框架与目录树要看全量，仍走不带参数的 `/outline`。
 
 `tree` 一次性返回文档、章节和每块 140 字预览；正文按需走 `/units/:id/documents/:filename/chunks`。
 

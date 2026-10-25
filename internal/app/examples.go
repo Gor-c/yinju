@@ -37,6 +37,13 @@ func (s *Server) unitExamples(c *gin.Context) {
 		fail(c, err)
 		return
 	}
+	// 只从原始文档出题：沉淀文档本身就是某一轮问答的转述，
+	// 拿它出题会出现《主题笔记：由 2 条历史问答整理》这类问题。
+	docIDs, err = s.originalDocIDs(c, docIDs)
+	if err != nil {
+		fail(c, err)
+		return
+	}
 	if len(docIDs) == 0 {
 		c.JSON(http.StatusOK, gin.H{"questions": []any{}})
 		return
