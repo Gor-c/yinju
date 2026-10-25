@@ -97,17 +97,24 @@
       />
     </div>
 
-    <el-drawer v-model="chunkDrawer" :title="`索引片段 · ${chunkDoc?.filename || ''}`" size="560px">
+    <el-drawer v-model="chunkDrawer" :title="chunkTitle" size="min(720px, 94vw)">
       <div v-if="chunkDoc" class="de-chunk-meta">
         <div><span>文档 ID</span><b>{{ chunkDoc.doc_id }}</b></div>
         <div><span>类型</span><b>{{ chunkDoc.doc_type || '未分类' }}</b></div>
         <div><span>文本块</span><b>{{ chunkTotal }}</b></div>
         <div><span>索引时间</span><b>{{ fullTime(chunkDoc.indexed_at) }}</b></div>
       </div>
+      <div class="de-chunk-summary">
+        <span>索引文本片段</span>
+        <span>共 {{ chunkTotal || '—' }} 块</span>
+      </div>
       <div v-if="chunkError" class="de-notice">{{ chunkError }}</div>
       <div v-loading="chunkLoading" class="de-chunk-list">
         <div v-for="c in chunkItems" :key="c.index" class="de-chunk">
-          <div class="de-chunk-head"><b>文本块 #{{ c.index }}</b></div>
+          <div class="de-chunk-head">
+            <b>片段 {{ c.index + 1 }}</b>
+            <span class="de-muted">{{ c.content.length.toLocaleString() }} 字</span>
+          </div>
           <p class="de-chunk-text" :class="{ collapsed: !c.expanded && c.content.length > 360, expanded: c.expanded }">{{ c.content }}</p>
           <button v-if="c.content.length > 360" class="de-chunk-toggle" type="button" @click="c.expanded = !c.expanded">
             {{ c.expanded ? '收起原文' : '展开全文' }}
@@ -118,12 +125,17 @@
         </div>
       </div>
       <div class="de-chunk-foot">
-        <el-button size="small" :disabled="chunkOffset === 0 || chunkLoading" @click="fetchChunks(Math.max(0, chunkOffset - chunkPageSize))">
-          上一页
-        </el-button>
-        <el-button size="small" :disabled="!chunkHasMore || chunkLoading" @click="fetchChunks(chunkOffset + chunkPageSize)">
-          下一页
-        </el-button>
+        <span class="de-muted">
+          {{ chunkItems.length ? `${chunkOffset + 1}–${chunkOffset + chunkItems.length}` : '0' }} / {{ chunkTotal || '—' }}
+        </span>
+        <div>
+          <el-button size="small" :disabled="chunkOffset === 0 || chunkLoading" @click="fetchChunks(Math.max(0, chunkOffset - chunkPageSize))">
+            上一页
+          </el-button>
+          <el-button size="small" :disabled="!chunkHasMore || chunkLoading" @click="fetchChunks(chunkOffset + chunkPageSize)">
+            下一页
+          </el-button>
+        </div>
       </div>
     </el-drawer>
 
@@ -209,6 +221,7 @@ const chunkDrawer = ref(false)
 const chunkLoading = ref(false)
 const chunkError = ref('')
 const chunkDoc = ref<DocItem | null>(null)
+const chunkTitle = computed(() => (chunkDoc.value ? `${chunkDoc.value.filename} · 索引内容` : '索引内容'))
 const chunkItems = ref<ChunkItem[]>([])
 const chunkOffset = ref(0)
 const chunkTotal = ref(0)
@@ -373,12 +386,12 @@ async function fetchChunks(offset: number) {
   try {
     const base = `/api/v1/units/${encodeURIComponent(unit)}/documents/${encodeURIComponent(chunkDoc.value.filename)}/chunks`
     const { data } = await axios.get(base, { params: { offset, limit: chunkPageSize } })
-    const list = (data?.items || data || []).map((c: any) => ({ ...c, expanded: false }))
-    chunkItems.value = Array.isArray(list) ? list : []
+    // 接口返回 { chunks, chunk_count, offset, has_more }：
+    // 早先按 items/total 读，字段名对不上会让抽屉里直接抛 TypeError。
+    chunkItems.value = (data?.chunks || []).map((c: any) => ({ ...c, expanded: false }))
     chunkOffset.value = data?.offset ?? offset
-    chunkTotal.value = data?.total ?? chunkItems.value.length
-    chunkHasMore.value = chunkItems.value.length >= chunkPageSize
-    if (!chunkTotal.value) chunkTotal.value = chunkItems.value.length
+    chunkTotal.value = data?.chunk_count ?? 0
+    chunkHasMore.value = !!data?.has_more
   } catch (e: any) {
     chunkError.value = e.response?.data?.error || '加载索引片段失败'
   } finally {
@@ -570,7 +583,20 @@ defineExpose({ reload: load })
   border-radius: 8px;
 }
 
+.de-chunk-summary {
+  display: flex;
+  justify-content: space-between;
+  padding-bottom: 8px;
+  margin-bottom: 10px;
+  font-size: calc(12px * var(--fs-scale));
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+}
+
 .de-chunk-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
   font-size: calc(12px * var(--fs-scale));
   color: var(--text-secondary);
   margin-bottom: 6px;

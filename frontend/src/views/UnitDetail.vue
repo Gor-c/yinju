@@ -627,7 +627,13 @@ const sourceQuery = ref('')
 const sourceMatchIndex = ref(0)
 const sourceTextEl = ref<HTMLElement | null>(null)
 const sourceTab = ref<'preview' | 'text'>('preview')
-const previewableExtensions = ['.pdf', '.docx', '.xlsx', '.xls', '.csv']
+// 这里的清单必须与 DocumentPreview 实际支持的格式一致：
+// 它内置了 markdown 与纯文本渲染，早先只列 pdf/docx/excel 会让 .md/.txt
+// 默认跳到「提取文本」，看起来像预览没生效。
+const previewableExtensions = [
+  '.pdf', '.docx', '.xlsx', '.xls', '.csv',
+  '.md', '.markdown', '.txt', '.json', '.html', '.htm',
+]
 const sourcePreviewable = computed(() => previewableExtensions.some((ext) => sourceDoc.value?.filename.toLowerCase().endsWith(ext)))
 const sourceFileURL = computed(() => sourceDoc.value ? `/api/v1/units/${encodeURIComponent(id.value)}/documents/${encodeURIComponent(sourceDoc.value.filename)}/file` : '#')
 const sourceDownloadURL = computed(() => (sourceDoc.value ? `${sourceFileURL.value}?download=1` : '#'))
