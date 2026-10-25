@@ -762,7 +762,7 @@ POST /api/v1/upload
 ## 8. Ubuntu / systemd 部署
 
 1. 安装 Go、Node 与 pnpm 10+（仅构建前端时需要）、PostgreSQL 客户端（`pdftotext` 可选，装了 PDF 解析更准）。
-2. 将源码部署到固定目录，用 `cd frontend && pnpm install && pnpm build` 构建 `frontend/dist`，再构建 Go 二进制（跨平台部署时交叉编译，例如 `GOOS=linux GOARCH=arm64 go build -o bin/knowledge-base ./cmd/server`）。
+2. 将源码部署到固定目录，用 `cd frontend && pnpm install && pnpm build` 构建 `frontend/dist`，再构建 Go 二进制（跨平台部署时交叉编译，例如 `GOOS=linux GOARCH=arm64 go build -o bin/server ./cmd/server`）。
 3. 从安全渠道写入 `/etc/knowledge-base/env`，限制为仅服务用户可读（例如 `0600`）。至少配置 `PG_DSN`、embedding/chat 密钥和 MCP token。
 4. 确认服务用户有 `UPLOAD_DIR` 和 `LOG_DIR` 写权限，例如 `install -d -o knowledgebase -g knowledgebase /var/log/knowledge-base` 并在 env 中设置 `LOG_DIR=/var/log/knowledge-base`；`deploy/knowledge-base.service` 已把该目录加入 `ReadWritePaths`。执行 schema 迁移并确保 PG 网络可达。
 5. 按部署路径调整 `deploy/knowledge-base.service` 中的 `WorkingDirectory` 和二进制路径，再启用服务。

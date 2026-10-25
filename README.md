@@ -15,8 +15,8 @@ psql "$PG_DSN" -f deploy/schema.sql
 # 仅 VECTOR_STORE=pgvector 时执行：
 # psql "$PG_DSN" -f deploy/schema-pgvector.sql
 cd frontend && pnpm install && pnpm build && cd ..
-# Chroma 跑在 OrbStack k8s（knowledge-base 命名空间），Service 是 ClusterIP，需先做端口转发：
-# kubectl -n knowledge-base port-forward svc/chroma 8000:8000 &
+# 若 Chroma 跑在 k8s 且 Service 是 ClusterIP，需先做端口转发：
+# kubectl -n <namespace> port-forward svc/chroma 8000:8000 &
 # curl -s localhost:8000/api/v2/heartbeat
 go run ./cmd/server   # 自动加载项目根目录的 .env，无需 source
 ```
