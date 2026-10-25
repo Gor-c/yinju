@@ -58,7 +58,7 @@
         <div>
           <div class="card-title">全部文档</div>
           <p>
-            {{ hasActiveFilter ? `当前显示 ${filteredItems.length} 份文档` : `共 ${total} 份文档` }}
+            {{ hasActiveFilter ? `当前显示 ${items.length} 份文档` : `共 ${total} 份文档` }}
             <span v-if="failed"> · {{ failed }} 份需要处理</span>
           </p>
         </div>
@@ -70,8 +70,8 @@
           class="docs-search"
           clearable
           placeholder="搜索文件名…"
-          @keyup.enter="load"
-          @clear="load"
+          @keyup.enter="resetAndLoad"
+          @clear="resetAndLoad"
         >
           <template #prefix>
             <svg class="docs-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
@@ -80,10 +80,10 @@
             </svg>
           </template>
         </el-input>
-        <el-select v-model="unitFilter" class="docs-unit-filter" clearable placeholder="全部知识库" @change="load">
+        <el-select v-model="unitFilter" class="docs-unit-filter" clearable placeholder="全部知识库" @change="resetAndLoad">
           <el-option v-for="u in units" :key="u.unit_id" :label="u.name" :value="u.unit_id" />
         </el-select>
-        <el-radio-group v-model="stateFilter" class="docs-state-filter" size="small">
+        <el-radio-group v-model="stateFilter" class="docs-state-filter" size="small" @change="resetAndLoad">
           <el-radio-button value="">全部</el-radio-button>
           <el-radio-button value="indexed">可用</el-radio-button>
           <el-radio-button value="failed">需处理</el-radio-button>
@@ -92,7 +92,7 @@
       </div>
 
       <div v-loading="loading" class="docs-list">
-        <div v-if="!loading && !filteredItems.length" class="docs-empty">
+        <div v-if="!loading && !items.length" class="docs-empty">
           <span class="docs-empty-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
               <path d="M7 3h7l4 4v14H7zM14 3v5h5M9.5 13h5M9.5 16.5h3" />
@@ -105,7 +105,7 @@
         </div>
 
         <article
-          v-for="row in filteredItems"
+          v-for="row in items"
           :key="`${row.state}-${row.doc_id || row.job_id}-${row.filename}`"
           class="doc-card"
           :class="{ failed: row.state !== 'indexed' }"
@@ -143,6 +143,19 @@
             </template>
           </div>
         </article>
+      </div>
+
+      <div v-if="total > 0" class="docs-pagination">
+        <el-pagination
+          v-model:current-page="page"
+          v-model:page-size="pageSize"
+          :total="total"
+          :page-sizes="[20, 50, 100]"
+          layout="total, sizes, prev, pager, next"
+          background
+          @current-change="load"
+          @size-change="onPageSizeChange"
+        />
       </div>
     </section>
 
@@ -288,9 +301,10 @@ const previewSrc = computed(() => {
   return `/api/v1/units/${encodeURIComponent(unit.unit_id)}/documents/${encodeURIComponent(previewDoc.value.filename)}/file`
 })
 
-const filteredItems = computed(() =>
-  stateFilter.value ? items.value.filter((item) => item.state === stateFilter.value) : items.value,
-)
+// 列表分页：总数与状态筛选都在服务端完成，翻页不会丢掉「需处理」的文档。
+const page = ref(1)
+const pageSize = ref(20)
+
 const hasActiveFilter = computed(() => !!keyword.value.trim() || !!unitFilter.value || !!stateFilter.value)
 
 function fileExtension(filename: string) {
@@ -324,7 +338,7 @@ async function clearFilters() {
   keyword.value = ''
   unitFilter.value = ''
   stateFilter.value = ''
-  await load()
+  await resetAndLoad()
 }
 
 async function load() {
@@ -332,18 +346,38 @@ async function load() {
   error.value = ''
   try {
     const res = await axios.get('/api/v1/documents', {
-      params: { q: keyword.value.trim(), unit_id: unitFilter.value, limit: 200 },
+      params: {
+        q: keyword.value.trim(),
+        unit_id: unitFilter.value,
+        state: stateFilter.value,
+        limit: pageSize.value,
+        offset: (page.value - 1) * pageSize.value,
+      },
     })
     items.value = res.data?.items || []
     total.value = res.data?.total || 0
     failed.value = res.data?.failed || 0
     chunks.value = res.data?.chunks || 0
     orphans.value = res.data?.orphans || 0
+    // 筛选后总数变少，当前页可能超出范围，回退到第一页而不是显示空白。
+    if (page.value > 1 && !items.value.length && total.value > 0) {
+      page.value = 1
+      return load()
+    }
   } catch (e: any) {
     error.value = e.response?.data?.error || '加载文档库失败'
   } finally {
     loading.value = false
   }
+}
+
+function resetAndLoad() {
+  page.value = 1
+  return load()
+}
+
+function onPageSizeChange() {
+  return resetAndLoad()
 }
 
 async function loadUnits() {
@@ -454,6 +488,12 @@ onMounted(async () => {
 <style scoped>
 .docs-page {
   max-width: 1220px;
+}
+
+.docs-pagination {
+  display: flex;
+  justify-content: flex-end;
+  padding: calc(14px * var(--fs-scale)) 4px 0;
 }
 
 .docs-page-head {

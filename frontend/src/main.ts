@@ -18,6 +18,7 @@ import SettingsMemory from './views/SettingsMemory.vue'
 import SettingsWebSearch from './views/SettingsWebSearch.vue'
 import SettingsBrand from './views/SettingsBrand.vue'
 import SettingsInstance from './views/SettingsInstance.vue'
+import NotFound from './views/NotFound.vue'
 import './style.css'
 
 const router = createRouter({
@@ -45,6 +46,9 @@ const router = createRouter({
         { path: 'agents', component: AgentDefs },
       ],
     },
+    // 兜底：服务端对未知路径会回落到 index.html，前端必须给出明确提示，
+    // 否则用户看到的是一个没有内容的空壳页面。
+    { path: '/:pathMatch(.*)*', component: NotFound },
   ],
 })
 

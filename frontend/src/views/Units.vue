@@ -75,6 +75,7 @@
             <el-button size="small" text @click="openEdit(current)">设置</el-button>
             <el-button size="small" @click="uploadToUnit(current)">上传</el-button>
             <el-button size="small" type="primary" @click="chatWithUnit(current)">开始对话</el-button>
+            <el-button size="small" text type="danger" @click="removeUnit(current)">删除</el-button>
           </div>
         </header>
 
@@ -225,7 +226,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import axios from 'axios'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRouter } from 'vue-router'
 
 interface Unit {
@@ -452,6 +453,32 @@ function openEdit(row: Unit) {
     tags: [...(row.tags || [])],
   }
   dialog.value = true
+}
+
+// 删除知识库 ≠ 删除文档：文档是全局实体，只解除绑定。
+// 提示里必须把这句话说清楚，否则用户会以为文档也没了（或反过来）。
+async function removeUnit(row: Unit) {
+  try {
+    await ElMessageBox.confirm(
+      `将删除知识库「${row.name}」。` +
+        `该库下的 ${row.document_count || 0} 份文档只会解除绑定，仍保留在「文档库」中，可重新绑定或单独删除；` +
+        '本库的任务记录、图谱与结构化记录会一并删除，此操作不可撤销。',
+      '删除知识库',
+      { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' },
+    )
+  } catch {
+    return
+  }
+  try {
+    const { data } = await axios.delete(`/api/v1/units/${encodeURIComponent(row.unit_id)}`)
+    const detached = data?.documents_detached || 0
+    ElMessage.success(detached ? `知识库已删除，${detached} 份文档已解除绑定` : '知识库已删除')
+    detailCache.clear()
+    if (selectedId.value === row.unit_id) selectedId.value = ''
+    await Promise.all([load(), loadMeta()])
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || '删除失败')
+  }
 }
 
 async function save() {
