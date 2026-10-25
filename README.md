@@ -118,6 +118,7 @@ pnpm build       # vue-tsc -b + vite build
 | 能力 | 联网搜索 | `/settings/web-search` | 搜索服务、站点范围、缓存限制 | 保存即生效 |
 | 检索与记忆 | 检索参数 | `/settings/retrieval` | 召回条数、两道闸门阈值、切块、记忆窗口 | 保存即生效（切块只影响新入库文档） |
 | 检索与记忆 | 记忆与上下文 | `/settings/memory` | 查看摘要、约束事实、滑出窗口的消息 | 只读 + 可重建 |
+| 检索与记忆 | 知识沉淀 | `/settings/drafts` | 问答候选、整理成笔记、采纳入库 | 采纳后进入索引队列 |
 | 扩展 | Agent 与技能 | `/settings/agents` | 上传与管理 Agent、技能定义 | 保存即生效 |
 | 部署 | 实例配置 | `/settings/instance` | 数据库、向量库、监听地址、数据目录 | **需重启** |
 

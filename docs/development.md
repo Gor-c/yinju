@@ -820,3 +820,5 @@ CHROMA_URL=http://localhost:8000 CHROMA_INTEGRATION_TEST=1 go test ./internal/ve
 早期文档里这几条已经实现，留个说明避免重复投入：hybrid 检索（向量 + pg_trgm，RRF 融合）、cross-encoder 精排、双层拒答（阈值 + 二元组覆盖率闸门）、内联引用角标、检索分层留痕、Agent 工具循环与并发执行、持久化索引队列、内容框架与目录树、示例问题生成与验证、三层会话记忆与事实冲突消解、品牌与外观模板、实例配置页与回滚。
 
 基础功能补齐（2026-10-25）：单库 `GET`/`DELETE`（删库只解绑、不删全局文档，见 [api.md](api.md) 的删除语义）、文档库服务端分页与 `state` 筛选、前端 404 兜底、错误体带 `request_id`、`/health` 带构建版本、`/ask` 与 `/retrieve` 参数统一为 `unit_ids` 且引用编号由服务端分配。知识库资源查询已收敛为 `unitSelectSQL` + `unitPayload`，列表与详情共用，新增展示字段只改一处。
+
+**知识沉淀闭环（2026-10-25）**：问答不再只用于拼接 prompt。`runAgent` 成功后把「有文档依据的回答」异步写成 `kb_drafts` 候选（`content_hash` 去重，纯网页答案与拒答不沉淀）；每小时检查一次，待审核问答满 8 条自动整理成主题笔记（`kind=note`，原问答标 `merged`）；**只有人工采纳才会写入知识库**——采纳时生成 Markdown 并复用现有 `index_jobs` 队列，切块、嵌入、向量身份、章节抽取与普通上传完全一致。未采纳的草稿不参与检索，避免模型输出自我强化。详见 [api.md](api.md) 的知识沉淀一节。
