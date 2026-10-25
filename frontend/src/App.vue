@@ -238,6 +238,7 @@ const labels: Record<string, string> = {
   '/settings/web-search': '联网搜索',
   '/settings/retrieval': '检索参数',
   '/settings/memory': '记忆与上下文',
+  '/settings/drafts': '知识沉淀',
   '/settings/agents': 'Agent 与技能',
 }
 const activeMenu = computed(() => {

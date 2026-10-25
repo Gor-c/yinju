@@ -18,6 +18,7 @@ import SettingsMemory from './views/SettingsMemory.vue'
 import SettingsWebSearch from './views/SettingsWebSearch.vue'
 import SettingsBrand from './views/SettingsBrand.vue'
 import SettingsInstance from './views/SettingsInstance.vue'
+import SettingsDrafts from './views/SettingsDrafts.vue'
 import NotFound from './views/NotFound.vue'
 import './style.css'
 
@@ -42,6 +43,7 @@ const router = createRouter({
         { path: 'instance', component: SettingsInstance },
         { path: 'retrieval', component: SettingsRetrieval },
         { path: 'memory', component: SettingsMemory },
+        { path: 'drafts', component: SettingsDrafts },
         { path: 'web-search', component: SettingsWebSearch },
         { path: 'agents', component: AgentDefs },
       ],
