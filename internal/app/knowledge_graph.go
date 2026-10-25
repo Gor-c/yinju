@@ -98,7 +98,10 @@ func (s *Server) unitGraph(c *gin.Context) {
 		edges = append(edges, graphEdge{Source: "unit:" + id, Target: nodeID, Type: "industry"})
 	}
 
-	rows, err := s.db.Query(c, `SELECT filename,doc_type,chunk_count FROM documents WHERE unit_id=$1 ORDER BY filename`, id)
+	// 文档与知识库是多对多（document_units）关系，documents 上没有 unit_id 列。
+	rows, err := s.db.Query(c, `SELECT d.filename,d.doc_type,d.chunk_count
+		FROM documents d JOIN document_units du ON du.doc_id=d.doc_id
+		WHERE du.unit_id=$1 ORDER BY d.filename`, id)
 	if err != nil {
 		fail(c, err)
 		return

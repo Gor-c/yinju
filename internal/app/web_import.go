@@ -66,8 +66,11 @@ func (s *Server) webImport(c *gin.Context) {
 	}
 
 	// The same page must not be archived twice under different names.
+	// 文档与知识库是多对多（document_units），documents 上没有 unit_id 列。
 	var existing string
-	if err := s.db.QueryRow(c, `SELECT filename FROM documents WHERE unit_id=$1 AND source_url=$2`,
+	if err := s.db.QueryRow(c, `SELECT d.filename FROM documents d
+		JOIN document_units du ON du.doc_id=d.doc_id
+		WHERE du.unit_id=$1 AND d.source_url=$2 LIMIT 1`,
 		unit, page.URL).Scan(&existing); err == nil {
 		c.JSON(http.StatusOK, gin.H{"imported": false, "duplicate": true, "filename": existing})
 		return
@@ -122,7 +125,9 @@ func (s *Server) importFilename(ctx context.Context, unit, requested string, pag
 	}
 	base = strings.TrimSuffix(base, ".txt") + ".txt"
 	var taken string
-	if err := s.db.QueryRow(ctx, `SELECT filename FROM documents WHERE unit_id=$1 AND filename=$2`, unit, base).Scan(&taken); err == nil {
+	if err := s.db.QueryRow(ctx, `SELECT d.filename FROM documents d
+		JOIN document_units du ON du.doc_id=d.doc_id
+		WHERE du.unit_id=$1 AND d.filename=$2 LIMIT 1`, unit, base).Scan(&taken); err == nil {
 		base = strings.TrimSuffix(base, ".txt") + "-" + fmt.Sprintf("%d", time.Now().Unix()%100000) + ".txt"
 	}
 	return base
