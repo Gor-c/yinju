@@ -1,4 +1,6 @@
-# 知识库管理系统
+# 引据 Yinju
+
+> 一个不肯编答案的知识库：每个结论都能追到具体文档与片段，答不上来就直说。
 
 Go + Vue 3 的知识库管理与 Agent 对话入口。Go 负责 API、文件解析、切块、调用 OpenAI-compatible embedding/chat API，以及通过可替换的 pgvector/Chroma provider 持久化向量；内置 Agent 使用只读工具循环并通过 SSE 流式回答。前端提供项目管理（分类、行业、标签、Agent/技能绑定、本地知识关联图谱）、文档上传、项目画像、档案检索、Agent 对话（支持同时选择多个知识库、展示所选知识库画像、历史会话回看）以及 Agent/技能定义上传。
 
