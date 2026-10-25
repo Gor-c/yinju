@@ -8,6 +8,17 @@ data/instance.env.*
 data/brand/
 data/uploads/
 
+# 评测集与真实档案绑定：里面的文档名、人名、评分数据都来自私有资料，
+# 不能进公开仓库。公开版本是 eval/questions.example.json（纯占位）。
+eval/questions.json
+
+# Agent 协作过程的本地笔记：含本机端口、库 id 与排查记录，属于工作日志不是项目文档。
+.workbuddy/
+
+# 从 WorkBuddy 专家中心分发的第三方文档处理套件（3.9MB，无许可证声明），
+# 不随本项目再分发；需要时从专家中心安装。
+workbuddy/document-skills/
+
 bin/
 frontend/node_modules/
 frontend/dist/

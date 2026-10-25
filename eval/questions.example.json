@@ -1,0 +1,31 @@
+{
+  "description": "检索评测集模板。这里只有占位数据：换成你自己的知识库与文档再跑。expect_no_evidence 判定检索层拒答（零命中）；expect_answer_refusal 判定生成层拒答（需加 -answer，回答须说明资料中没有）。真实评测集建议放在 eval/questions.json（已被 .gitignore 忽略）。",
+  "cases": [
+    {
+      "id": "demo-01",
+      "unit_id": "unit-demo-policy",
+      "question": "示例：某类作业的限值要求是多少？",
+      "expect_files": ["示例-管理制度.docx"],
+      "expect_content": ["80%"]
+    },
+    {
+      "id": "demo-02",
+      "unit_id": "unit-demo-policy",
+      "question": "示例：某项工作应在几个工作日内完成？",
+      "expect_files": ["示例-管理制度.docx"],
+      "expect_content": ["3 个工作日"]
+    },
+    {
+      "id": "demo-03",
+      "unit_id": "unit-demo-policy",
+      "question": "示例：资料里没有的问题（用于验证检索层拒答）",
+      "expect_no_evidence": true
+    },
+    {
+      "id": "demo-04",
+      "unit_id": "unit-demo-handbook",
+      "question": "示例：资料只提到 A，被问成 B 时应拒答",
+      "expect_answer_refusal": true
+    }
+  ]
+}

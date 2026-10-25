@@ -4,9 +4,9 @@ Go + Vue 3 的知识库管理与 Agent 对话入口。Go 负责 API、文件解�
 
 ## 启动
 
-需要 Go 1.23+、Node 20+、PostgreSQL 15+，以及 Chroma 或 pgvector 之一作为向量存储。
+需要 Go 1.25+（见 `go.mod`）、Node 20+、PostgreSQL 15+，以及 Chroma 或 pgvector 之一作为向量存储。
 
-本地开发：业务表（`units`/`hazards`/`audit_records`/`index_jobs`/`documents`/`agent_runs`/`agent_steps`）始终走 PostgreSQL；向量默认写本地 Chroma（`VECTOR_STORE=chroma`），线上可切换为 pgvector。Chroma 需先启动（本项目跑在 OrbStack k8s，Service 为 ClusterIP，必须先 `kubectl -n knowledge-base port-forward svc/chroma 8000:8000`，否则 Go 服务启动会因连不上向量库而失败）；若使用 pgvector，则安装扩展并额外执行 `deploy/schema-pgvector.sql`。复制 `.env.example` 为 `.env` 并填写配置，然后初始化业务表：
+本地开发：业务表（`units`/`hazards`/`audit_records`/`index_jobs`/`documents`/`agent_runs`/`agent_steps`）始终走 PostgreSQL；向量默认写本地 Chroma（`VECTOR_STORE=chroma`），线上可切换为 pgvector。Chroma 需先启动（最省事是 `docker run -d --name kb-chroma -p 8000:8000 -v kb-chroma-data:/data chromadb/chroma:1.5.9`；若跑在 k8s 里且 Service 是 ClusterIP，必须先 `kubectl -n <namespace> port-forward svc/chroma 8000:8000`，否则 Go 服务会因连不上向量库而启动失败）；若使用 pgvector，则安装扩展并额外执行 `deploy/schema-pgvector.sql`。复制 `.env.example` 为 `.env` 并填写配置，然后初始化业务表：
 
 ```sh
 # psql 需要 shell 里先加载 .env
@@ -128,3 +128,12 @@ pnpm build       # vue-tsc -b + vite build
 - **存文件的**（实例配置）决定进程怎么启动，只能重启生效。它刻意**不读数据库**——数据库地址改错时，这个页面仍然能打开、能回滚，详见 [`docs/instance-config.md`](docs/instance-config.md)。
 
 旧地址 `/agents` 会重定向到 `/settings/agents`。外观相关（配色取值、加新主题、图标规格）见 [`docs/brand.md`](docs/brand.md)。
+
+## 许可证与数据边界
+
+[MIT](LICENSE)。安全问题请按 [SECURITY.md](SECURITY.md) 的流程私密报告——**本项目默认没有身份认证**，不要直接暴露到公网。参与开发见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
+仓库里不含真实档案：
+
+- `eval/questions.example.json` 是占位模板；真实评测集 `eval/questions.json` 与 `data/uploads/`、`data/instance.env` 都在 `.gitignore` 里。
+- `workbuddy/knowledge-base-connector/` 是本项目的连接器包；`workbuddy/document-skills/` 属于 WorkBuddy 专家中心分发的第三方套件（无许可证声明），不随本仓库分发，需要时在专家中心安装。

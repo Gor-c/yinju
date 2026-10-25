@@ -123,7 +123,7 @@ flowchart LR
 | 内容框架 / 目录树 | `/units/:id/{outline,tree,examples}` | 从切块反推章节结构，规则版本落 `doc_outlines` |
 | 知识图谱 | `/units/:id/graph`、`/kg/extract` | 独立抽取，用于浏览；不进检索 |
 | 联网搜索 | 工具 `web_search` | 仅在知识库无答案时用，出处另计 |
-| 评测 | `cmd/eval` + `eval/questions.json` | 离线跑，不进服务进程 |
+| 评测 | `cmd/eval` + `eval/questions.json`（模板见 `questions.example.json`） | 离线跑，不进服务进程 |
 
 ### 1.1.1 分层与扩展点
 
@@ -448,7 +448,7 @@ flowchart TD
 
 拒答分两层：检索层零命中直接 `no_evidence`（不调用大模型）；有相关片段但资料不足时由系统提示约束模型明确说明「资料中没有提到」，不得用常识补全。
 
-**评测**：`eval/questions.json` 内含 16 条用例（4 个知识库，含检索层拒答 4 条、生成层拒答 1 条）。
+**评测**：评测集与真实档案绑定，不进公开仓库——`eval/questions.example.json` 是占位模板，把它复制成 `eval/questions.json` 再换成自己的用例（后者已被 `.gitignore` 忽略）。一条用例可以只断言命中文件，也可以断言 `expect_content` 关键词、`expect_no_evidence`（检索层应零命中）或 `expect_answer_refusal`（生成层应说明资料中没有）。
 
 ```bash
 go run ./cmd/eval            # 只跑检索（毫秒级），判定命中文件与关键词
@@ -518,7 +518,7 @@ Agent 与技能管理不再作为全局侧栏一级菜单；原 `/agents` 路由
 
 ## 2. 本地开发环境
 
-需要 Go 1.23+、Node.js 20+、pnpm 10+ 和 PostgreSQL 15+。
+需要 Go 1.25+（见 `go.mod`）、Node.js 20+、pnpm 10+ 和 PostgreSQL 15+。
 
 数据落点：
 
@@ -535,38 +535,40 @@ psql "$PG_DSN" -f deploy/schema.sql
 cd frontend && pnpm install
 ```
 
-### 启动 Chroma（OrbStack k8s）
+### 启动 Chroma
 
-本项目的 Chroma 跑在 OrbStack 的 k8s 里（`knowledge-base` 命名空间，Deployment/Service 同名 `chroma`，PVC `chroma-data` 持久化到 `/data`）。它的 Service 是 ClusterIP，**集群外无法直连，必须做端口转发**——转发进程一断，`127.0.0.1:8000` 就不通，Go 服务启动会直接失败并报 `initialize Chroma collection ... connection refused`。
+本地开发默认 `VECTOR_STORE=chroma`，需要一个 Chroma server（v2 API）。
 
-服务启动前先确保转发在跑：
+**Docker（最快）**
 
 ```sh
-# 1. 确认 Pod 活着（不是 Running 先排查镜像拉取/探针）
-kubectl -n knowledge-base get pod,svc,pvc
-
-# 2. 首次部署（清单在 ./chroma-k8s.yaml）
-kubectl apply -f ./chroma-k8s.yaml
-kubectl -n knowledge-base rollout status deploy/chroma
-
-# 3. 常驻转发（放后台，另开终端会被中断）
-nohup kubectl -n knowledge-base port-forward svc/chroma 8000:8000 > /tmp/chroma-pf.log 2>&1 &
-sleep 2
+docker run -d --name kb-chroma -p 8000:8000 -v kb-chroma-data:/data chromadb/chroma:1.5.9
 curl -s localhost:8000/api/v2/heartbeat     # 应返回 {"nanosecond heartbeat":...}
 ```
 
-三种运行位置对应的地址：
+**k8s（如果已经有一套集群）**
 
-| 后端在哪跑 | 转发命令 | `.env` 的 `CHROMA_URL` |
+Service 是 ClusterIP 时集群外连不上，必须做端口转发；**转发进程一断，`127.0.0.1:8000` 就不通，Go 服务启动会直接失败**并报 `initialize Chroma collection ... connection refused`。
+
+```sh
+kubectl -n <namespace> port-forward svc/chroma 8000:8000
+```
+
+两个部署细节是踩过的：
+
+- Deployment 要设 `enableServiceLinks: false`。Service 名叫 `chroma` 时 k8s 会注入 `CHROMA_PORT=tcp://...`，与 Chroma 自身的 `PORT` 冲突，容器启动直接 panic。
+- 单副本 + `strategy: Recreate`。Chroma server 模式写路径是单实例，同卷多挂载会出问题。
+
+后端可能跑在三个位置，地址不同：
+
+| 后端在哪跑 | 要不要转发 | `CHROMA_URL` |
 | --- | --- | --- |
-| mac 本机 | `port-forward svc/chroma 8000:8000` | `http://127.0.0.1:8000` |
-| OrbStack 容器里（推荐，免转发） | **不需要** | `http://<CLUSTER-IP>:8000`，用 `kubectl -n knowledge-base get svc chroma` 查 |
-| OrbStack 容器里（走 mac 转发） | `port-forward --address 0.0.0.0 svc/chroma 8000:8000` | `http://host.docker.internal:8000` |
-| k8s 集群内 | 不需要 | `http://chroma.knowledge-base.svc:8000` |
+| 宿主机（本机） | 要 | `http://127.0.0.1:8000` |
+| 同一 Docker 网络里的容器 | 不要 | `http://<容器名或服务名>:8000` |
+| k8s 集群内 | 不要 | `http://chroma.<namespace>.svc:8000` |
+| 容器里但走宿主机转发 | 要，且加 `--address 0.0.0.0` | `http://host.docker.internal:8000` |
 
-**实测：OrbStack 容器可以直接访问 Service 的 ClusterIP**（`curl http://192.0.2.10:8000/api/v2/heartbeat` 返回 `{"nanosecond heartbeat":...}`），所以后端跑在容器里时根本不用转发，把 `CHROMA_URL` 填成 ClusterIP 即可。缺点是 ClusterIP 在 Service 重建后会变；要固定地址就把 Service 改成 `type: NodePort`（指定 `nodePort: 30800`），一劳永逸。
-
-mac 本机跑后端时仍需转发（默认监听 `127.0.0.1`，只对 mac 生效；后端在容器里则必须加 `--address 0.0.0.0`）。
+后端跑在容器里时，宿主机上的转发默认只监听 `127.0.0.1`，容器访问不到——这是最容易卡住的一步，必须加 `--address 0.0.0.0`。
 
 终端 A 启动后端：
 
