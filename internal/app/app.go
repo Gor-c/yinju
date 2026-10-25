@@ -97,8 +97,12 @@ func New() (*Server, error) {
 		s.ensureMemorySchema(context.Background())
 		// 品牌配置：名称、副标题与 logo，页面可随时改。
 		s.ensureBrandSchema(context.Background())
+		// 知识沉淀：问答候选与主题笔记，采纳前不参与检索。
+		s.ensureKnowledgeDraftSchema(context.Background())
 		// 持久化队列消费者：启动时重新排队被中断的任务，之后持续领取 queued 任务。
 		s.startJobWorker()
+		// 定期把积累的问答整理成主题笔记（仍只是草稿，不自动入库）。
+		s.startKnowledgeDistiller()
 		// 老数据的向量早已入库，关键词镜像为空时后台回填一次。
 		go s.backfillChunkText(context.Background())
 		// 内容框架：给已入库但还没有章节的文档补抽一次。
@@ -175,6 +179,10 @@ func (s *Server) routes() *gin.Engine {
 	a.POST("/retrieve", s.retrieve)
 	// 检索留痕：最近若干次检索的分层计数，用来判断「为什么没答上来」。
 	a.GET("/retrieval/traces", s.retrievalTraces)
+	a.GET("/kb/drafts", s.kbDraftList)
+	a.POST("/kb/drafts/distill", s.distillDrafts)
+	a.POST("/kb/drafts/:id/accept", s.acceptKnowledgeDraft)
+	a.POST("/kb/drafts/:id/dismiss", s.dismissKnowledgeDraft)
 	a.GET("/agent/runs/:id", s.agentRunDetail)
 	a.GET("/connectors", s.connectors)
 	a.GET("/settings/models", s.modelSettings)

@@ -182,7 +182,13 @@ func (s *Server) runAgent(ctx context.Context, in agentChatRequest, runID string
 
 	collector := &citationCollector{}
 	registry := s.agentRegistry(ctx, unitIDs, unitNames, collector, s.effectiveTools(in.Expert, skillIDs, declaredTools), in.WebSearch)
-	return s.runAgentLoop(ctx, in, runID, messages, client, registry, collector, skillIDs, emit)
+	answer, err := s.runAgentLoop(ctx, in, runID, messages, client, registry, collector, skillIDs, emit)
+	if err == nil {
+		// 问答的价值不只在当次回答：把有依据的问答沉淀为候选草稿，
+		// 由「知识沉淀」页审核后才会进入知识库，形成闭环。
+		s.scheduleKnowledgeDraft(in, unitIDs, answer)
+	}
+	return answer, err
 }
 
 // runAgentLoop runs the tool-calling loop and persists the outcome.
