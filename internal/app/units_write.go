@@ -224,6 +224,48 @@ func (s *Server) updateUnit(c *gin.Context) {
 	})
 }
 
+// unitDetail 返回单个知识库。字段与列表项完全一致（共用 unitSelectSQL），
+// 前端可以在「列表数据」与「详情数据」之间互换，不需要两套字段映射。
+func (s *Server) unitDetail(c *gin.Context) {
+	if !s.ready(c) {
+		return
+	}
+	item, err := unitPayload(s.db.QueryRow(c, unitSelectSQL+" WHERE u.unit_id=$1", c.Param("id")))
+	if err != nil {
+		fail(c, err)
+		return
+	}
+	c.JSON(200, item)
+}
+
+// deleteUnit 只删除知识库本身。document_units 的绑定、hazards、audit_records、
+// index_jobs、kg_* 都声明了 ON DELETE CASCADE，会随库一起清掉；
+// documents、chunks、向量库、doc_outlines 是全局实体（可被多个库引用），
+// 不在此删除——解绑后的文档仍能在「文档库」里看到，可重新绑定或单独删除。
+// 会话里残留的 unit_id 引用不清空：检索时已验证返回空结果而不是报错。
+func (s *Server) deleteUnit(c *gin.Context) {
+	if !s.ready(c) {
+		return
+	}
+	id := c.Param("id")
+	var detached int
+	if err := s.db.QueryRow(c, `SELECT count(*) FROM document_units WHERE unit_id=$1`, id).Scan(&detached); err != nil {
+		fail(c, err)
+		return
+	}
+	tag, err := s.db.Exec(c, `DELETE FROM units WHERE unit_id=$1`, id)
+	if err != nil {
+		fail(c, err)
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "unit not found"})
+		return
+	}
+	logging.App().Info("unit_deleted", "request_id", c.GetString(requestIDKey), "unit_id", id, "documents_detached", detached)
+	c.JSON(200, gin.H{"deleted": true, "unit_id": id, "documents_detached": detached})
+}
+
 // effectiveTools prefers tools declared directly on a project and falls back
 // to the agent/skill derivation when nothing is declared.
 func (s *Server) effectiveTools(expertID string, skillIDs, declared []string) []string {

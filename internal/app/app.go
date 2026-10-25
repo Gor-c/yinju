@@ -118,7 +118,9 @@ func (s *Server) routes() *gin.Engine {
 	r := gin.New()
 	r.Use(s.requestIDMiddleware, s.accessLogMiddleware, s.recoveryMiddleware, s.authMiddleware())
 	r.Static("/assets", filepath.Join("frontend", "dist", "assets"))
-	r.GET("/health", func(c *gin.Context) { c.JSON(200, gin.H{"status": "ok", "database": s.db != nil}) })
+	r.GET("/health", func(c *gin.Context) {
+		c.JSON(200, gin.H{"status": "ok", "database": s.db != nil, "version": buildVersion()})
+	})
 	r.POST("/mcp", s.mcp)
 	r.GET("/mcp", func(c *gin.Context) { c.Header("Allow", "POST"); c.Status(http.StatusMethodNotAllowed) })
 	a := r.Group("/api/v1")
@@ -131,6 +133,8 @@ func (s *Server) routes() *gin.Engine {
 	a.GET("/units/profiles", s.unitProfiles)
 	a.POST("/units", s.createUnit)
 	a.PATCH("/units/:id", s.updateUnit)
+	a.GET("/units/:id", s.unitDetail)
+	a.DELETE("/units/:id", s.deleteUnit)
 	a.GET("/units/:id/agent-config", s.unitAgentConfig)
 	a.GET("/units/:id/outline", s.unitOutline)
 	a.GET("/units/:id/tree", s.unitTree)
@@ -245,34 +249,67 @@ func (s *Server) ready(c *gin.Context) bool {
 	return true
 }
 
+// unitSelectSQL 是「知识库」这个资源的唯一查询定义，列表与单库详情共用。
+// 需要给知识库加一个展示字段时只改这里，两处接口会同时生效。
+const unitSelectSQL = `SELECT u.unit_id,u.name,u.unit_type,u.industry,u.expert_id,u.skill_ids,u.tool_names,u.tags,u.created_at,
+	(SELECT count(*) FROM document_units du WHERE du.unit_id=u.unit_id) AS document_count,
+	(SELECT COALESCE(sum(d.chunk_count),0) FROM documents d
+		JOIN document_units du2 ON du2.doc_id=d.doc_id WHERE du2.unit_id=u.unit_id) AS chunk_count,
+	(SELECT max(d.indexed_at) FROM documents d
+		JOIN document_units du3 ON du3.doc_id=d.doc_id WHERE du3.unit_id=u.unit_id) AS last_indexed_at,
+	(SELECT COALESCE(json_agg(DISTINCT d.doc_type) FILTER (WHERE d.doc_type<>''), '[]'::json)
+		FROM documents d JOIN document_units du4 ON du4.doc_id=d.doc_id WHERE du4.unit_id=u.unit_id) AS doc_types,
+	-- 列表页要回答「这个库讲了什么」，所以带上章节数与代表性章节标题；
+	-- 这些来自抽取结果，不是文件元数据。
+	(SELECT COALESCE(sum(jsonb_array_length(o.entries)),0) FROM doc_outlines o
+		JOIN document_units du5 ON du5.doc_id=o.doc_id WHERE du5.unit_id=u.unit_id) AS chapter_count,
+	(SELECT COALESCE(jsonb_agg(x.title), '[]'::jsonb) FROM (
+		SELECT e->>'title' AS title
+		FROM doc_outlines o2 JOIN document_units du6 ON du6.doc_id=o2.doc_id
+		CROSS JOIN LATERAL jsonb_array_elements(o2.entries) WITH ORDINALITY AS t(e, ord)
+		WHERE du6.unit_id=u.unit_id AND (e->>'level')::int = 1
+		ORDER BY o2.filename, ord
+		LIMIT 6) x) AS chapters,
+	(SELECT COALESCE(json_agg(t.filename), '[]'::json) FROM (
+		SELECT d.filename FROM documents d JOIN document_units du7 ON du7.doc_id=d.doc_id
+		WHERE du7.unit_id=u.unit_id ORDER BY d.indexed_at DESC LIMIT 3) t) AS doc_names
+	FROM units u`
+
+// unitPayload 把一行 unitSelectSQL 的结果翻译成接口字段。
+// pgx.Row 与 pgx.Rows 都有 Scan(dest ...any) error，所以两种调用可以共用。
+func unitPayload(row interface{ Scan(...any) error }) (gin.H, error) {
+	var id, n, t, i, expert string
+	var skillRaw, toolRaw, tagRaw []byte
+	var createdAt time.Time
+	var docCount, chunkCount, chapterCount int
+	var lastIndexed *time.Time
+	var docTypesRaw, chaptersRaw, docNamesRaw []byte
+	if err := row.Scan(&id, &n, &t, &i, &expert, &skillRaw, &toolRaw, &tagRaw, &createdAt,
+		&docCount, &chunkCount, &lastIndexed, &docTypesRaw,
+		&chapterCount, &chaptersRaw, &docNamesRaw); err != nil {
+		return nil, err
+	}
+	docTypes := []string{}
+	_ = json.Unmarshal(docTypesRaw, &docTypes)
+	chapters := []string{}
+	_ = json.Unmarshal(chaptersRaw, &chapters)
+	docNames := []string{}
+	_ = json.Unmarshal(docNamesRaw, &docNames)
+	return gin.H{
+		"unit_id": id, "name": n, "unit_type": t, "industry": i, "expert_id": expert,
+		"skill_ids": decodeSkillIDs(skillRaw), "tool_names": decodeSkillIDs(toolRaw), "tags": decodeSkillIDs(tagRaw),
+		"created_at": createdAt,
+		"document_count": docCount, "chunk_count": chunkCount, "last_indexed_at": lastIndexed,
+		"doc_types": docTypes, "chapter_count": chapterCount, "chapters": chapters, "doc_names": docNames,
+	}, nil
+}
+
 func (s *Server) units(c *gin.Context) {
 	if !s.ready(c) {
 		return
 	}
 	// 知识库只是文档分组：列表直接带出文档数、文本块与最后索引时间。
-	rows, e := s.db.Query(c, `SELECT u.unit_id,u.name,u.unit_type,u.industry,u.expert_id,u.skill_ids,u.tool_names,u.tags,
-		(SELECT count(*) FROM document_units du WHERE du.unit_id=u.unit_id) AS document_count,
-		(SELECT COALESCE(sum(d.chunk_count),0) FROM documents d
-			JOIN document_units du2 ON du2.doc_id=d.doc_id WHERE du2.unit_id=u.unit_id) AS chunk_count,
-		(SELECT max(d.indexed_at) FROM documents d
-			JOIN document_units du3 ON du3.doc_id=d.doc_id WHERE du3.unit_id=u.unit_id) AS last_indexed_at,
-		(SELECT COALESCE(json_agg(DISTINCT d.doc_type) FILTER (WHERE d.doc_type<>''), '[]'::json)
-			FROM documents d JOIN document_units du4 ON du4.doc_id=d.doc_id WHERE du4.unit_id=u.unit_id) AS doc_types,
-		-- 列表页要回答「这个库讲了什么」，所以带上章节数与代表性章节标题；
-		-- 这些来自抽取结果，不是文件元数据。
-		(SELECT COALESCE(sum(jsonb_array_length(o.entries)),0) FROM doc_outlines o
-			JOIN document_units du5 ON du5.doc_id=o.doc_id WHERE du5.unit_id=u.unit_id) AS chapter_count,
-		(SELECT COALESCE(jsonb_agg(x.title), '[]'::jsonb) FROM (
-			SELECT e->>'title' AS title
-			FROM doc_outlines o2 JOIN document_units du6 ON du6.doc_id=o2.doc_id
-			CROSS JOIN LATERAL jsonb_array_elements(o2.entries) WITH ORDINALITY AS t(e, ord)
-			WHERE du6.unit_id=u.unit_id AND (e->>'level')::int = 1
-			ORDER BY o2.filename, ord
-			LIMIT 6) x) AS chapters,
-		(SELECT COALESCE(json_agg(t.filename), '[]'::json) FROM (
-			SELECT d.filename FROM documents d JOIN document_units du7 ON du7.doc_id=d.doc_id
-			WHERE du7.unit_id=u.unit_id ORDER BY d.indexed_at DESC LIMIT 3) t) AS doc_names
-		FROM units u ORDER BY u.name`)
+	rows, e := s.db.Query(c, unitSelectSQL+" ORDER BY u.name")
 	if e != nil {
 		fail(c, e)
 		return
@@ -280,29 +317,12 @@ func (s *Server) units(c *gin.Context) {
 	defer rows.Close()
 	out := []gin.H{}
 	for rows.Next() {
-		var id, n, t, i, expert string
-		var skillRaw, toolRaw, tagRaw []byte
-		var docCount, chunkCount, chapterCount int
-		var lastIndexed *time.Time
-		var docTypesRaw, chaptersRaw, docNamesRaw []byte
-		if e = rows.Scan(&id, &n, &t, &i, &expert, &skillRaw, &toolRaw, &tagRaw,
-			&docCount, &chunkCount, &lastIndexed, &docTypesRaw,
-			&chapterCount, &chaptersRaw, &docNamesRaw); e != nil {
-			fail(c, e)
+		item, err := unitPayload(rows)
+		if err != nil {
+			fail(c, err)
 			return
 		}
-		docTypes := []string{}
-		_ = json.Unmarshal(docTypesRaw, &docTypes)
-		chapters := []string{}
-		_ = json.Unmarshal(chaptersRaw, &chapters)
-		docNames := []string{}
-		_ = json.Unmarshal(docNamesRaw, &docNames)
-		out = append(out, gin.H{
-			"unit_id": id, "name": n, "unit_type": t, "industry": i, "expert_id": expert,
-			"skill_ids": decodeSkillIDs(skillRaw), "tool_names": decodeSkillIDs(toolRaw), "tags": decodeSkillIDs(tagRaw),
-			"document_count": docCount, "chunk_count": chunkCount, "last_indexed_at": lastIndexed,
-			"doc_types": docTypes, "chapter_count": chapterCount, "chapters": chapters, "doc_names": docNames,
-		})
+		out = append(out, item)
 	}
 	if e = rows.Err(); e != nil {
 		fail(c, e)
@@ -424,26 +444,29 @@ func fail(c *gin.Context, e error) {
 		"path", c.Request.URL.Path,
 		"error", e,
 	}
+	// 错误体里必须带 request_id：响应头虽然也有，但用户截图/复制报错时
+	// 只会带上 body，没有这个 id 就无法在 access.log 里定位到同一次请求。
+	requestID := c.GetString(requestIDKey)
 	if errors.Is(e, pgx.ErrNoRows) {
 		logging.App().Warn("request_not_found", attrs...)
-		c.JSON(404, gin.H{"error": "not found"})
+		c.JSON(404, gin.H{"error": "not found", "request_id": requestID})
 		return
 	}
 	logging.App().Error("request_failed", append(attrs, "status", 500)...)
 	if errors.Is(e, errEmbeddingConfig) || errors.Is(e, errChatConfig) {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": e.Error()})
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": e.Error(), "request_id": requestID})
 		return
 	}
 	// 向量空间不匹配是运维问题，不是程序缺陷：必须把「跑哪条命令修」告诉
 	// 调用方，否则只会看到一句 internal server error，无从下手。
 	var mismatch *rag.IdentityMismatch
 	if errors.As(e, &mismatch) {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": mismatch.Error()})
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": mismatch.Error(), "request_id": requestID})
 		return
 	}
 	// Keep database and dependency details in the log; do not leak them to the
 	// client response.
-	c.JSON(500, gin.H{"error": "internal server error"})
+	c.JSON(500, gin.H{"error": "internal server error", "request_id": requestID})
 }
 
 func env(k, d string) string {

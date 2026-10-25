@@ -55,6 +55,35 @@ func newRequestID() string {
 	return fmt.Sprintf("%x", time.Now().UnixNano())
 }
 
+// buildVersion 从 Go 构建信息里取 VCS 版本，不需要改构建命令。
+// 在 git 仓库中执行 go build 时会自动写入 vcs.revision；取不到就返回 dev，
+// 不虚构版本号。有未提交改动时追加 +dirty，避免「看起来是新代码」的误判。
+func buildVersion() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "dev"
+	}
+	var revision, modified string
+	for _, setting := range info.Settings {
+		switch setting.Key {
+		case "vcs.revision":
+			revision = setting.Value
+		case "vcs.modified":
+			modified = setting.Value
+		}
+	}
+	if revision == "" {
+		return "dev"
+	}
+	if len(revision) > 7 {
+		revision = revision[:7]
+	}
+	if modified == "true" {
+		revision += "+dirty"
+	}
+	return revision
+}
+
 // accessLogMiddleware writes one structured record per request. Query strings
 // are deliberately omitted so tokens are never written to logs.
 func (s *Server) accessLogMiddleware(c *gin.Context) {
@@ -111,7 +140,9 @@ func (s *Server) recoveryMiddleware(c *gin.Context) {
 			c.Abort()
 			return
 		}
-		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{
+			"error": "internal server error", "request_id": c.GetString(requestIDKey),
+		})
 	}()
 	c.Next()
 }

@@ -24,9 +24,10 @@ var (
 )
 
 type askRequest struct {
-	UnitID   string `json:"unit_id"`
-	Question string `json:"question"`
-	TopK     int    `json:"top_k"`
+	UnitID   string   `json:"unit_id"`
+	UnitIDs  []string `json:"unit_ids"`
+	Question string   `json:"question"`
+	TopK     int      `json:"top_k"`
 }
 
 type connector struct {
@@ -69,6 +70,9 @@ type citation struct {
 	Distance   float64 `json:"distance,omitempty"`
 	// Score 是重排分（rerank）或融合分，前端只在 hover 时展示。
 	Score float64 `json:"score,omitempty"`
+	// Index 是服务端分配的引用编号（1 起）。/ask 按返回顺序写入，
+	// 与 /agent 的工具结果 index 语义一致；其他路径不填则不输出。
+	Index int `json:"index,omitempty"`
 }
 
 const (
@@ -91,10 +95,20 @@ func truncateRunes(value string, limit int) string {
 func (s *Server) ask(c *gin.Context) {
 	started := time.Now()
 	var in askRequest
-	if e := c.ShouldBindJSON(&in); e != nil || in.UnitID == "" || in.Question == "" {
-		c.JSON(400, gin.H{"error": "unit_id and question are required"})
+	// 参数与 /retrieve 对齐：unit_ids 为数组，unit_id 单值兼容保留。
+	if e := c.ShouldBindJSON(&in); e != nil || strings.TrimSpace(in.Question) == "" {
+		c.JSON(400, gin.H{"error": "question is required"})
 		return
 	}
+	units := cleanSkillIDs(in.UnitIDs)
+	if len(units) == 0 && strings.TrimSpace(in.UnitID) != "" {
+		units = []string{strings.TrimSpace(in.UnitID)}
+	}
+	if len(units) == 0 {
+		c.JSON(400, gin.H{"error": "unit_id or unit_ids is required"})
+		return
+	}
+	in.Question = strings.TrimSpace(in.Question)
 	if len([]rune(in.Question)) > maxQuestionRunes {
 		c.JSON(400, gin.H{"error": fmt.Sprintf("question exceeds %d characters", maxQuestionRunes)})
 		return
@@ -106,20 +120,22 @@ func (s *Server) ask(c *gin.Context) {
 		c.JSON(503, gin.H{"error": "vector store is not configured"})
 		return
 	}
-	exists, e := s.unitExists(c, in.UnitID)
-	if e != nil {
-		fail(c, e)
-		return
-	}
-	if !exists {
-		c.JSON(404, gin.H{"error": "unit not found: " + in.UnitID})
-		return
+	for _, id := range units {
+		exists, e := s.unitExists(c, id)
+		if e != nil {
+			fail(c, e)
+			return
+		}
+		if !exists {
+			c.JSON(404, gin.H{"error": "unit not found: " + id})
+			return
+		}
 	}
 	k := in.TopK
 	if k < 1 || k > 20 {
 		k = 5
 	}
-	docIDs, e := s.docIDsForUnits(c, []string{in.UnitID})
+	docIDs, e := s.docIDsForUnits(c, units)
 	if e != nil {
 		fail(c, e)
 		return
@@ -131,35 +147,47 @@ func (s *Server) ask(c *gin.Context) {
 	}
 	citations := []citation{}
 	var contextParts []string
-	for _, match := range matches {
+	// 文档是全局实体、可被多个库引用，所以只有单库提问时才标注来源库。
+	singleUnit := ""
+	if len(units) == 1 {
+		singleUnit = units[0]
+	}
+	for i, match := range matches {
 		citations = append(citations, citation{
-			SourceType: "document", UnitID: in.UnitID, Filename: match.Filename, DocType: match.DocType,
+			SourceType: "document", UnitID: singleUnit, Filename: match.Filename, DocType: match.DocType,
 			DocID: match.DocID, ChunkIndex: match.ChunkIndex, Content: match.Content,
-			Distance: match.Distance, Score: match.Score,
+			Distance: match.Distance, Score: match.Score, Index: i + 1,
 		})
-		contextParts = append(contextParts, "["+match.Filename+"] "+match.Content)
+		// 编号由服务端按顺序分配，模型只能引用这些编号，不能自己数。
+		contextParts = append(contextParts, fmt.Sprintf("[%d] 文件名：%s\n%s", i+1, match.Filename, match.Content))
 	}
 	// 严格模式：没有达到阈值的依据时直接说明未找到，不让模型自由发挥。
 	if len(matches) == 0 {
 		logging.App().Info("rag_ask_no_evidence",
-			"request_id", c.GetString(requestIDKey), "unit_id", in.UnitID,
+			"request_id", c.GetString(requestIDKey), "unit_ids", units,
 			"duration_ms", time.Since(started).Milliseconds())
-		c.JSON(200, gin.H{"answer": noEvidenceAnswer, "citations": []citation{}, "no_evidence": true})
+		c.JSON(200, gin.H{"answer": noEvidenceAnswer, "citations": []citation{}, "no_evidence": true, "unit_ids": units})
 		return
 	}
-	answer, e := s.complete(c, "你是知识库分析专家。请仅根据给定资料回答；资料不足时明确说明。", "问题："+in.Question+"\n\n检索资料：\n"+strings.Join(contextParts, "\n\n"))
+	answer, e := s.complete(c,
+		`你是知识库分析专家。严格按以下规则回答：
+1. 只依据给定资料；资料不足时明确说明，不得用常识、经验或猜测补全。
+2. 每处结论后用方括号标注来源编号，形如「牵引力不得超过 80%[2]」，编号只能取自资料的 [n] 标记；同一段话引用多处就并排标注 [2][5]。
+3. 不要编造资料中未出现的数字、时间与责任主体。
+4. 正文里不要罗列来源清单，界面已按编号展示引用。`,
+		"问题："+in.Question+"\n\n检索资料：\n"+strings.Join(contextParts, "\n\n"))
 	if e != nil {
 		fail(c, e)
 		return
 	}
 	logging.App().Info("rag_ask_completed",
 		"request_id", c.GetString(requestIDKey),
-		"unit_id", in.UnitID,
+		"unit_ids", units,
 		"top_k", k,
 		"citations", len(citations),
 		"duration_ms", time.Since(started).Milliseconds(),
 	)
-	c.JSON(200, gin.H{"answer": answer, "citations": citations})
+	c.JSON(200, gin.H{"answer": answer, "citations": citations, "unit_ids": units})
 }
 
 // retrieve 只做检索、不调用大模型，用于评测、调试与「检索预览」。

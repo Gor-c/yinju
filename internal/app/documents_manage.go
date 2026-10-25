@@ -52,6 +52,18 @@ const documentCountQuery = `SELECT count(*), COALESCE(sum(chunk_count), 0),
 	WHERE ($1 = '' OR filename ILIKE '%' || $1 || '%')
 		AND ($2 = '' OR EXISTS (SELECT 1 FROM document_units du2 WHERE du2.doc_id = documents.doc_id AND du2.unit_id = $2))`
 
+// 失败总数单独统计：原来用「本次取到的失败条数」充当总数，会被页大小截断，
+// 分页之后顶部那句「N 份需要处理」会随翻页变化，失去意义。
+const documentFailedCountQuery = `SELECT count(*) FROM (
+	SELECT DISTINCT j.unit_id, j.filename FROM index_jobs j
+	WHERE j.status = 'failed'
+		AND ($1 = '' OR j.filename ILIKE '%' || $1 || '%')
+		AND ($2 = '' OR j.unit_id = $2)
+		AND NOT EXISTS (
+			SELECT 1 FROM documents d
+			JOIN document_units du ON du.doc_id = d.doc_id
+			WHERE d.filename = j.filename AND du.unit_id = j.unit_id)) t`
+
 // documentList 返回文档库列表：已索引文档 + 索引失败的任务，统一按时间倒序。
 func (s *Server) documentList(c *gin.Context) {
 	if !s.ready(c) {
@@ -72,8 +84,21 @@ func (s *Server) documentList(c *gin.Context) {
 		}
 	}
 
+	// state 让「可用 / 需处理」的筛选在服务端完成。否则分页之后，
+	// 前端只能筛当前页，看起来就像「失败文档消失了」。
+	state := strings.TrimSpace(c.Query("state"))
+	if state != "" && state != "indexed" && state != "failed" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "state must be indexed or failed"})
+		return
+	}
+
 	indexedTotal, chunks, orphans := 0, 0, 0
 	if err := s.db.QueryRow(c, documentCountQuery, q, unitID).Scan(&indexedTotal, &chunks, &orphans); err != nil {
+		fail(c, err)
+		return
+	}
+	failedTotal := 0
+	if err := s.db.QueryRow(c, documentFailedCountQuery, q, unitID).Scan(&failedTotal); err != nil {
 		fail(c, err)
 		return
 	}
@@ -81,60 +106,62 @@ func (s *Server) documentList(c *gin.Context) {
 	// 两个来源各自多取一些，合并排序后再分页（文档库规模有限，这样比 UNION 更易读）。
 	fetch := limit + offset
 	items := []gin.H{}
-	rows, err := s.db.Query(c, documentListQuery, q, unitID, fetch, 0)
-	if err != nil {
-		fail(c, err)
-		return
-	}
-	for rows.Next() {
-		var docID, filename, docType string
-		var chunkCount int
-		var indexedAt time.Time
-		var unitsRaw []byte
-		if err := rows.Scan(&docID, &filename, &docType, &chunkCount, &indexedAt, &unitsRaw); err != nil {
-			rows.Close()
+	if state != "failed" {
+		rows, err := s.db.Query(c, documentListQuery, q, unitID, fetch, 0)
+		if err != nil {
 			fail(c, err)
 			return
 		}
-		units := []gin.H{}
-		_ = json.Unmarshal(unitsRaw, &units)
-		items = append(items, gin.H{
-			"state": "indexed", "doc_id": docID, "filename": filename, "doc_type": docType,
-			"chunk_count": chunkCount, "indexed_at": indexedAt,
-			"ref_count": len(units), "units": units,
-		})
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		fail(c, err)
-		return
+		for rows.Next() {
+			var docID, filename, docType string
+			var chunkCount int
+			var indexedAt time.Time
+			var unitsRaw []byte
+			if err := rows.Scan(&docID, &filename, &docType, &chunkCount, &indexedAt, &unitsRaw); err != nil {
+				rows.Close()
+				fail(c, err)
+				return
+			}
+			units := []gin.H{}
+			_ = json.Unmarshal(unitsRaw, &units)
+			items = append(items, gin.H{
+				"state": "indexed", "doc_id": docID, "filename": filename, "doc_type": docType,
+				"chunk_count": chunkCount, "indexed_at": indexedAt,
+				"ref_count": len(units), "units": units,
+			})
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			fail(c, err)
+			return
+		}
 	}
 
-	failedRows, err := s.db.Query(c, documentFailedQuery, q, unitID, fetch)
-	if err != nil {
-		fail(c, err)
-		return
-	}
-	failedCount := 0
-	for failedRows.Next() {
-		var jobID, failedUnit, filename, docType, phase, unitName string
-		var updatedAt time.Time
-		if err := failedRows.Scan(&jobID, &failedUnit, &filename, &docType, &phase, &updatedAt, &unitName); err != nil {
-			failedRows.Close()
+	if state != "indexed" {
+		failedRows, err := s.db.Query(c, documentFailedQuery, q, unitID, fetch)
+		if err != nil {
 			fail(c, err)
 			return
 		}
-		failedCount++
-		items = append(items, gin.H{
-			"state": "failed", "job_id": jobID, "filename": filename, "doc_type": docType,
-			"phase": phase, "chunk_count": 0, "indexed_at": updatedAt, "ref_count": 1,
-			"units": []gin.H{{"unit_id": failedUnit, "name": unitName}},
-		})
-	}
-	failedRows.Close()
-	if err := failedRows.Err(); err != nil {
-		fail(c, err)
-		return
+		for failedRows.Next() {
+			var jobID, failedUnit, filename, docType, phase, unitName string
+			var updatedAt time.Time
+			if err := failedRows.Scan(&jobID, &failedUnit, &filename, &docType, &phase, &updatedAt, &unitName); err != nil {
+				failedRows.Close()
+				fail(c, err)
+				return
+			}
+			items = append(items, gin.H{
+				"state": "failed", "job_id": jobID, "filename": filename, "doc_type": docType,
+				"phase": phase, "chunk_count": 0, "indexed_at": updatedAt, "ref_count": 1,
+				"units": []gin.H{{"unit_id": failedUnit, "name": unitName}},
+			})
+		}
+		failedRows.Close()
+		if err := failedRows.Err(); err != nil {
+			fail(c, err)
+			return
+		}
 	}
 
 	sort.SliceStable(items, func(i, j int) bool {
@@ -151,9 +178,18 @@ func (s *Server) documentList(c *gin.Context) {
 		items = items[:limit]
 	}
 
+	total := indexedTotal + failedTotal
+	switch state {
+	case "indexed":
+		total = indexedTotal
+	case "failed":
+		total = failedTotal
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"count": len(items), "total": indexedTotal + failedCount, "failed": failedCount,
-		"chunks": chunks, "orphans": orphans, "limit": limit, "offset": offset, "items": items,
+		"count": len(items), "total": total, "failed": failedTotal,
+		"chunks": chunks, "orphans": orphans, "limit": limit, "offset": offset,
+		"state": state, "items": items,
 	})
 }
 
