@@ -41,7 +41,7 @@
           <div class="ce-list-head">
             <span>从这里开始</span>
             <span v-if="examplesLoading" class="ce-list-note">正在读取章节…</span>
-            <span v-else-if="realExamples.length" class="ce-list-note">来自本库章节，已验证可检索</span>
+            <span v-else-if="realExamples.length" class="ce-list-note">来自本库章节，已验证可检索 · 点击填入，按 Enter 发送</span>
           </div>
           <button
             v-for="(item, i) in suggestions"
@@ -66,6 +66,7 @@
             :key="c"
             type="button"
             class="ce-chapter"
+            :disabled="busy"
             @click="useSuggestedPrompt(`《${c}》主要讲了什么？`)"
           >{{ c }}</button>
         </div>
@@ -671,7 +672,8 @@ const experts = ref<Expert[]>([])
 const skills = ref<Skill[]>([])
 const messages = ref<Msg[]>([])
 const draft = ref('')
-const composerInput = ref<{ focus: () => void } | null>(null)
+// textarea 是 el-input 暴露的原生节点，用来把光标放到末尾。
+const composerInput = ref<{ focus: () => void; textarea?: HTMLTextAreaElement } | null>(null)
 const busy = ref(false)
 const unitIds = ref<string[]>([])
 const profiles = ref<UnitProfile[]>([])
@@ -1260,17 +1262,30 @@ async function copy(text: string) {
   }
 }
 
-// 点示例就等于提问：只把文字填进输入框，用户还得再按一次回车，
-// 这一步没有任何决策价值，反而让「点了没反应」的错觉出现。
-async function useSuggestedPrompt(prompt: string) {
-  if (busy.value) return
+// 把一句话放进输入框并把光标停到末尾——只做这一步，不发送。
+async function fillComposer(prompt: string) {
   draft.value = prompt
   await nextTick()
-  composerInput.value?.focus()
-  await send()
+  const input = composerInput.value
+  input?.focus()
+  // 光标停到末尾，方便接着补「只看第 3 章」这类限定，而不是从头改。
+  const el = input?.textarea
+  if (el) {
+    const end = el.value.length
+    el.setSelectionRange(end, end)
+  }
 }
 
-// 从知识库页「能问什么」跳过来时，问题已经在 URL 里，直接发出去。
+// 点示例只「填入」，不代发。
+// 示例本质是「帮你把问题写顺」，替不替代用户提问应该由用户决定：
+// 点击即发送会因误触直接消耗一次模型调用，而想补一句限定条件时只能等答完再追问。
+async function useSuggestedPrompt(prompt: string) {
+  if (busy.value) return
+  await fillComposer(prompt)
+}
+
+// 从知识库页「能问什么」跳过来时，问题在 URL 里：同样只填入、不自动发送，
+// 让「点一下」和「真的问出去」始终是两步。
 let queriedQuestionHandled = ''
 async function runQueriedQuestion() {
   const value = route.query.q
@@ -1278,10 +1293,8 @@ async function runQueriedQuestion() {
   const question = String(value)
   if (queriedQuestionHandled === question) return
   queriedQuestionHandled = question
-  draft.value = question
-  await nextTick()
-  await send()
-  // 清掉 URL 里的 q，刷新页面不会重复提问。
+  await fillComposer(question)
+  // 清掉 URL 里的 q，刷新页面不会重复填入。
   const rest = { ...route.query }
   delete rest.q
   router.replace({ path: route.path, query: rest })
