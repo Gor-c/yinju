@@ -1,10 +1,33 @@
 package app
 
 import (
+	"os"
 	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestDocumentExportAgentDefinitionIsValid(t *testing.T) {
+	raw, err := os.ReadFile("../../agents/document-export.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := parseExpertDef("document-export.json", raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.ID != "document-export" || item.Name != "文档导出助手" {
+		t.Fatalf("unexpected definition: %#v", item)
+	}
+	if !reflect.DeepEqual(item.Tools, []string{
+		"get_unit_profile", "query_hazards", "audit_history", "vector_search",
+	}) {
+		t.Fatalf("tools = %#v", item.Tools)
+	}
+	if !strings.Contains(item.SystemPrompt, "Markdown") || !strings.Contains(item.SystemPrompt, "CSV") {
+		t.Fatalf("prompt does not describe supported export formats")
+	}
+}
 
 func TestParseSkillDefMarkdown(t *testing.T) {
 	raw := []byte("---\nid: risk-review\nname: 风险复核\ndescription: 复核隐患与审核\ntools: query_hazards, audit_history\n---\n\n先看隐患，再核对审核记录。\n")
