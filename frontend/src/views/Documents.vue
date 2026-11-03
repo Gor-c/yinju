@@ -140,18 +140,22 @@
             <template v-else>
               <el-button size="small" type="primary" :disabled="busy" @click="retry(row)">重新索引</el-button>
               <el-button size="small" @click="openLatestJob(row)">查看任务</el-button>
+              <el-button size="small" type="danger" plain :disabled="!row.job_id" @click="removeFailed(row)">删除</el-button>
             </template>
           </div>
         </article>
       </div>
 
       <div v-if="total > 0" class="docs-pagination">
+        <span class="docs-pagination-note">
+          每页 {{ pageSize }} 条 · 共 {{ total }} 份
+        </span>
         <el-pagination
           v-model:current-page="page"
           v-model:page-size="pageSize"
           :total="total"
-          :page-sizes="[20, 50, 100]"
-          layout="total, sizes, prev, pager, next"
+          :page-sizes="[8, 16, 32, 64]"
+          layout="sizes, prev, pager, next, jumper"
           background
           @current-change="load"
           @size-change="onPageSizeChange"
@@ -303,7 +307,7 @@ const previewSrc = computed(() => {
 
 // 列表分页：总数与状态筛选都在服务端完成，翻页不会丢掉「需处理」的文档。
 const page = ref(1)
-const pageSize = ref(20)
+const pageSize = ref(8)
 
 const hasActiveFilter = computed(() => !!keyword.value.trim() || !!unitFilter.value || !!stateFilter.value)
 
@@ -454,6 +458,27 @@ async function retry(row: DocItem) {
   }
 }
 
+// 失败的任务没有文档记录，删除的是任务与源文件；要恢复只能重新上传。
+async function removeFailed(row: DocItem) {
+  if (!row.job_id) return
+  try {
+    await ElMessageBox.confirm(
+      '将删除这条失败记录及上传的源文件，之后需要重新上传才能再次解析。',
+      `确定删除「${row.filename}」？`,
+      { type: 'warning', confirmButtonText: '确认删除', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  try {
+    await axios.delete(`/api/v1/jobs/${encodeURIComponent(row.job_id)}`)
+    ElMessage.success('已删除')
+    await load()
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || '删除失败')
+  }
+}
+
 async function remove(row: DocItem) {
   if (!row.doc_id) return
   const refs = row.ref_count
@@ -492,8 +517,22 @@ onMounted(async () => {
 
 .docs-pagination {
   display: flex;
-  justify-content: flex-end;
-  padding: calc(14px * var(--fs-scale)) 4px 0;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  padding: 12px 20px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-subtle);
+}
+
+.docs-pagination-note {
+  font-size: calc(12px * var(--fs-scale));
+  color: var(--text-muted);
+}
+
+.docs-pagination :deep(.el-pagination) {
+  margin-left: auto;
 }
 
 .docs-page-head {

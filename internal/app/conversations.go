@@ -62,6 +62,48 @@ func (s *Server) ensureConversation(ctx context.Context, id, unitID string, unit
 
 // appendConversationMessage is best-effort: history persistence must never
 // break a chat response.
+// dropLastTurn 删除会话最后一轮「用户提问 + 助手回答」，供「重新回答」覆盖。
+// 只有两条记录成对时才删除两条；只剩一条 assistant 时只删它，避免误删。
+func (s *Server) dropLastTurn(ctx context.Context, conversationID string) {
+	if s.db == nil || conversationID == "" {
+		return
+	}
+	saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+
+	rows, err := s.db.Query(saveCtx, `SELECT id, role FROM agent_messages
+		WHERE conversation_id=$1 ORDER BY id DESC LIMIT 2`, conversationID)
+	if err != nil {
+		logging.App().Warn("conversation_drop_last_turn_failed", "conversation_id", conversationID, "error", err)
+		return
+	}
+	ids := []int64{}
+	roles := []string{}
+	for rows.Next() {
+		var id int64
+		var role string
+		if err := rows.Scan(&id, &role); err == nil {
+			ids = append(ids, id)
+			roles = append(roles, role)
+		}
+	}
+	rows.Close()
+
+	remove := 0
+	switch {
+	case len(roles) == 2 && roles[0] == "assistant" && roles[1] == "user":
+		remove = 2
+	case len(roles) >= 1 && roles[0] == "assistant":
+		remove = 1
+	}
+	if remove == 0 {
+		return
+	}
+	if _, err := s.db.Exec(saveCtx, `DELETE FROM agent_messages WHERE id = ANY($1)`, ids[:remove]); err != nil {
+		logging.App().Warn("conversation_drop_last_turn_failed", "conversation_id", conversationID, "error", err)
+	}
+}
+
 func (s *Server) appendConversationMessage(ctx context.Context, conversationID, role, content string, citations []citation, runID string) {
 	if s.db == nil || conversationID == "" {
 		return

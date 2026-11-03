@@ -329,6 +329,7 @@ func (s *Server) indexFile(ctx context.Context, j *Job, path string) {
 	for i, chunk := range parsed {
 		chunks[i] = chunk.Content
 	}
+	j.setDocID(docID)
 	logger.Info("index_job_doc_resolved", "doc_id", docID)
 	s.updateJobPhase(j, "running", phaseIndex, 25, "调用 BGE-M3 生成向量")
 	for start := 0; start < len(chunks); start += embedBatchSize {
@@ -339,17 +340,17 @@ func (s *Server) indexFile(ctx context.Context, j *Job, path string) {
 		batch := chunks[start:end]
 		vecs, err := s.embedContext(ctx, batch)
 		if err != nil {
-			s.failJob(j, err.Error())
+			s.failIndexJob(ctx, j, docID, err.Error())
 			return
 		}
 		if len(vecs) != len(batch) {
-			s.failJob(j, fmt.Sprintf("embedding API returned %d vectors for %d chunks", len(vecs), len(batch)))
+			s.failIndexJob(ctx, j, docID, fmt.Sprintf("embedding API returned %d vectors for %d chunks", len(vecs), len(batch)))
 			return
 		}
 		out := make([]vectorstore.Chunk, 0, len(batch))
 		for i, vec := range vecs {
 			if len(vec) != embeddingDimensions() {
-				s.failJob(j, fmt.Sprintf("embedding dimension is %d, expected %d", len(vec), embeddingDimensions()))
+				s.failIndexJob(ctx, j, docID, fmt.Sprintf("embedding dimension is %d, expected %d", len(vec), embeddingDimensions()))
 				return
 			}
 			out = append(out, vectorstore.Chunk{
@@ -358,7 +359,7 @@ func (s *Server) indexFile(ctx context.Context, j *Job, path string) {
 			})
 		}
 		if err := s.vectors.Upsert(ctx, out); err != nil {
-			s.failJob(j, err.Error())
+			s.failIndexJob(ctx, j, docID, err.Error())
 			return
 		}
 		// 关键词镜像与向量同批写入，混合检索才有数据可用。
@@ -370,7 +371,7 @@ func (s *Server) indexFile(ctx context.Context, j *Job, path string) {
 	}
 	// Remove chunks left over from a previous, longer version of this document.
 	if err := s.vectors.DeleteFrom(ctx, docID, len(chunks)); err != nil {
-		s.failJob(j, err.Error())
+		s.failIndexJob(ctx, j, docID, err.Error())
 		return
 	}
 	if err := s.deleteChunkTextFrom(ctx, docID, len(chunks)); err != nil {
@@ -378,7 +379,7 @@ func (s *Server) indexFile(ctx context.Context, j *Job, path string) {
 	}
 	if err := s.recordDocument(ctx, view, docID, path, text, len(chunks), chunker.Name()); err != nil {
 		logger.Error("document_record_failed", "error", err)
-		s.failJob(j, fmt.Sprintf("文档记录失败: %v", err))
+		s.failIndexJob(ctx, j, docID, fmt.Sprintf("文档记录失败: %v", err))
 		return
 	}
 	// 索引完成即抽章节：页面上的「内容框架」不必等用户手动点。
@@ -390,6 +391,39 @@ func (s *Server) indexFile(ctx context.Context, j *Job, path string) {
 		"chunks", len(chunks),
 		"duration_ms", time.Since(started).Milliseconds(),
 	)
+}
+
+// failIndexJob 处理索引阶段的失败：如果这份内容从未成功入库，把已经写入的
+// 部分向量与关键词镜像清掉，避免留下检索不到的孤儿数据。
+// 已存在的文档（同内容此前索引成功）必须保留旧索引，否则一次失败的重建
+// 会让原本可用的文档从检索里消失。
+func (s *Server) failIndexJob(ctx context.Context, j *Job, docID, message string) {
+	s.cleanupPartialIndex(ctx, docID)
+	s.failJob(j, message)
+}
+
+// cleanupPartialIndex 只在 documents 里没有该 doc_id 时清理。
+func (s *Server) cleanupPartialIndex(ctx context.Context, docID string) {
+	if docID == "" || s.vectors == nil || s.db == nil {
+		return
+	}
+	var exists bool
+	if err := s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM documents WHERE doc_id=$1)`, docID).Scan(&exists); err != nil {
+		logging.App().Warn("partial_index_check_failed", "doc_id", docID, "error", err)
+		return
+	}
+	if exists {
+		return
+	}
+	if err := s.vectors.DeleteDoc(ctx, docID); err != nil {
+		logging.App().Warn("partial_vectors_cleanup_failed", "doc_id", docID, "error", err)
+		return
+	}
+	if err := s.deleteChunkText(ctx, docID); err != nil {
+		logging.App().Warn("partial_chunk_text_cleanup_failed", "doc_id", docID, "error", err)
+		return
+	}
+	logging.App().Info("partial_index_cleaned", "doc_id", docID)
 }
 
 // recordDocument 以内容哈希为身份写入文档，并把文档挂到当前知识库下。

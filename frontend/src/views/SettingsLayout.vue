@@ -90,6 +90,17 @@ const groups = [
     ],
   },
   {
+    label: '自动化',
+    items: [
+      {
+        to: '/settings/schedules',
+        label: '定时同步',
+        hint: '语雀 / GitHub 定期拉取',
+        icon: 'M12 6v6l4 2M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Z',
+      },
+    ],
+  },
+  {
     label: '扩展',
     items: [
       {

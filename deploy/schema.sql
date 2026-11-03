@@ -64,12 +64,14 @@ CREATE TABLE IF NOT EXISTS index_jobs (
   message text NOT NULL DEFAULT '',
   chunks integer NOT NULL DEFAULT 0,
   attempts integer NOT NULL DEFAULT 0,
+  doc_id text NOT NULL DEFAULT '',
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 -- 已有库升级：任务队列需要记录源文件路径与重试次数（可重复执行）。
 ALTER TABLE index_jobs ADD COLUMN IF NOT EXISTS file_path text NOT NULL DEFAULT '';
 ALTER TABLE index_jobs ADD COLUMN IF NOT EXISTS attempts integer NOT NULL DEFAULT 0;
+ALTER TABLE index_jobs ADD COLUMN IF NOT EXISTS doc_id text NOT NULL DEFAULT '';
 -- 任务阶段：pending（排队）/ parse（解析）/ index（索引）/ done（完成）。
 ALTER TABLE index_jobs ADD COLUMN IF NOT EXISTS phase text NOT NULL DEFAULT 'pending';
 CREATE INDEX IF NOT EXISTS index_jobs_unit_idx ON index_jobs(unit_id);
@@ -359,3 +361,32 @@ ALTER TABLE agent_memory_facts ADD COLUMN IF NOT EXISTS topic text NOT NULL DEFA
 ALTER TABLE agent_memory_facts ADD COLUMN IF NOT EXISTS active boolean NOT NULL DEFAULT true;
 ALTER TABLE agent_memory_facts ADD COLUMN IF NOT EXISTS superseded_by bigint;
 ALTER TABLE agent_memory_facts ADD COLUMN IF NOT EXISTS superseded_at timestamptz;
+
+-- 远程导入源：语雀 / GitHub 的可复用配置。
+CREATE TABLE IF NOT EXISTS import_sources (
+  id bigserial PRIMARY KEY,
+  unit_id text NOT NULL,
+  kind text NOT NULL DEFAULT 'github',
+  name text NOT NULL DEFAULT '',
+  config jsonb NOT NULL DEFAULT '{}'::jsonb,
+  secret text NOT NULL DEFAULT '',
+  last_synced_at timestamptz,
+  sync_interval_minutes int NOT NULL DEFAULT 0,
+  next_sync_at timestamptz,
+  last_error text NOT NULL DEFAULT '',
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS import_sources_unit_idx ON import_sources(unit_id);
+CREATE INDEX IF NOT EXISTS import_sources_due_idx ON import_sources(next_sync_at);
+
+-- 已同步条目：记录远端版本，用于增量同步时跳过未变化的文件。
+CREATE TABLE IF NOT EXISTS import_items (
+  source_id bigint NOT NULL REFERENCES import_sources(id) ON DELETE CASCADE,
+  remote_id text NOT NULL,
+  remote_rev text NOT NULL DEFAULT '',
+  filename text NOT NULL DEFAULT '',
+  missing_at timestamptz,
+  synced_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (source_id, remote_id)
+);

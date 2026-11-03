@@ -53,6 +53,7 @@
 | GET | `/api/v1/jobs` | 最近索引任务列表（支持状态过滤） |
 | GET | `/api/v1/jobs/:id` | 查询索引任务状态（内存 + `index_jobs`） |
 | POST | `/api/v1/jobs/:id/retry` | 重新索引失败/已完成的任务（复用已保存的源文件） |
+| DELETE | `/api/v1/jobs/:id` | 删除失败任务及其源文件（排队中/运行中/已完成返回 409） |
 | POST | `/api/v1/ask` | 检索档案并生成回答 |
 | GET | `/api/v1/agent/config` | 获取专家、技能和 connector 描述 |
 | GET | `/api/v1/agent/definitions` | 获取内置 + 已上传的 Agent 与技能定义 |
@@ -238,7 +239,7 @@ curl '/api/v1/units/unit-xxx/graph?source=entity&doc_id=doc-7a6bfb6fad948db6'
 {"error":"文档解析失败：……","job_id":"1792572743815471000","filename":"预案.pdf","retryable":true}
 ```
 
-修好解析环境（安装 `pdftotext`、改用可解析的文件）或模型恢复后，调用 `POST /api/v1/jobs/:id/retry` 即可复用源文件重新索引，无需重新上传。解析成功时结果写入一次性缓存，队列任务直接复用，同一个文件只解析一次。
+修好解析环境（安装 `pdftotext`、改用可解析的文件）或模型恢复后，调用 `POST /api/v1/jobs/:id/retry` 即可复用源文件重新索引，无需重新上传。索引阶段中途失败时（例如第 2 批 embedding 报错），如果这份内容**从未成功入库**，服务会自动删掉已写入的部分向量与关键词镜像，不留检索不到的孤儿数据；已经存在的文档则保留旧索引，避免一次失败的重建把可用文档从检索里抹掉。若这份文件不再需要（例如上传错了、扫描件没有文本层且不打算 OCR），调用 `DELETE /api/v1/jobs/:id` 删除任务记录并移除源文件；只允许删除 `failed` 状态的任务，已完成的任务请走 `DELETE /api/v1/documents/:doc_id`（会连带清理向量与关键词镜像）。解析成功时结果写入一次性缓存，队列任务直接复用，同一个文件只解析一次。
 
 成功返回 HTTP 202：
 
@@ -251,8 +252,10 @@ curl '/api/v1/units/unit-xxx/graph?source=entity&doc_id=doc-7a6bfb6fad948db6'
 `GET /api/v1/jobs/:id`
 
 ```json
-{"job_id":"1780000000000000000","unit_id":"demo-001","doc_type":"制度","filename":"检查报告.docx","status":"running","progress":60,"message":"写出向量索引","chunks":8}
+{"job_id":"1780000000000000000","unit_id":"demo-001","doc_type":"制度","filename":"检查报告.docx","status":"running","progress":60,"message":"写出向量索引","chunks":8,"doc_id":"doc-7a6bfb6fad948db6"}
 ```
+
+`doc_id` 在解析出正文后出现（内容哈希），可用于定位该任务对应的文档；失败任务也保留它，便于排查。
 
 `GET /api/v1/jobs?status=queued,running&limit=20` 返回任务列表，用于切换页面后仍能查看进度：
 
@@ -367,6 +370,100 @@ curl '/api/v1/units/unit-xxx/graph?source=entity&doc_id=doc-7a6bfb6fad948db6'
 - 只读列表外的操作（查看片段、源文件）仍走 `/units/:id/documents/:filename/...`，用 `units[0]` 作为上下文即可。
 - 「文档库」页的「索引片段」抽屉即调用 `GET /units/:id/documents/:filename/chunks`（`units[0].unit_id` + `filename`），分页 10 条，仅在 `state=indexed` 时可用；失败项没有片段，只能重试任务。
 
+### 远程批量导入
+
+把语雀知识库或 GitHub 仓库里的文本文件抓下来，写入上传目录并创建 `index_jobs(queued)`，
+与手工上传走同一条管线：去重、重试、共享、删除行为完全一致。
+
+```bash
+# 语雀：知识库 + 个人 Token
+curl -X POST /api/v1/import/yuque -d '{
+  "unit_id":"unit-xxx","doc_type":"导入","limit":50,
+  "token":"<yuque token>","repo":"my-team/product-docs"
+}'
+
+# GitHub：公开仓库可省略 token
+curl -X POST /api/v1/import/github -d '{
+  "unit_id":"unit-xxx","doc_type":"导入","limit":50,
+  "owner":"acme","name":"docs","ref":"main","path":"docs"
+}'
+```
+
+响应：
+
+```json
+{"queued": 12, "skipped": 1, "failed": [{"name": "old/intro.md", "error": "内容为空"}]}
+```
+
+- `limit` 默认 50，上限 200；单文件上限 20 MB；并发抓取 4 路。
+- 语雀：`repo` 为 `namespace/仓库名`，Token 在「语雀 → 设置 → Token」获取；markdown 文档存为 `.md`，lake/html 文档存为 `.html` 交给现有解析器。
+- GitHub：`ref` 默认 `HEAD`，`path` 可限定子目录；只导入 `md/markdown/mdx/txt/html/htm/csv/json`。私有仓库需要 Token（`repo` 读权限即可）。
+- 文件名由远端标题或路径生成，非法字符替换为 `_`；同名只保留第一份，计入 `skipped`。
+- Token 只在本次请求使用，不写库、不落日志。
+
+### 导入源与增量同步
+
+一次性导入适合试水；长期使用时把配置存成「导入源」，之后一键同步只拉有变化的文档。
+
+```bash
+# 保存来源（Token 默认不落库）
+curl -X POST /api/v1/import/sources -d '{
+  "unit_id":"unit-xxx","kind":"github","name":"产品文档",
+  "config":{"owner":"acme","name":"docs","ref":"main","path":"docs","doc_type":"导入","limit":50},
+  "token":"<可选>","save_token":false
+}'
+
+# 同步：返回本次变化情况
+curl -X POST /api/v1/import/sources/1/sync -d '{"token":"<可选，覆盖已保存的>"}'
+# {"queued":1,"skipped":0,"unchanged":2,"failed":[]}
+
+# 只预览有多少待同步
+curl -X POST /api/v1/import/sources/1/sync -d '{"dry_run":true}'
+# {"dry_run":true,"pending":1,"unchanged":2}
+```
+
+| 接口 | 说明 |
+|---|---|
+| `GET /api/v1/import/sources?unit_id=` | 列出导入源（含 `item_count`、`last_synced_at`、`has_secret`） |
+| `POST /api/v1/import/sources` | 新建来源，`save_token=true` 才会保存 Token（明文，仅本机使用） |
+| `DELETE /api/v1/import/sources/:id` | 删除来源（级联删除同步记录，不影响已入库文档） |
+| `POST /api/v1/import/sources/:id/sync` | 增量同步，支持 `dry_run` |
+| `PUT /api/v1/import/sources/:id/schedule` | 设置定时同步间隔（分钟，`0` 关闭，上限 10080） |
+| `POST /api/v1/import/sources/:id/cleanup` | 清理「远端已删除」的条目：删除文档 + 移除同步记录 |
+
+增量判断依据：
+
+- 语雀：文档 `updated_at`（缺失时退回 `slug`），存于 `import_items.remote_rev`；正文按目录树生成文件名（`分组/子分组/标题.md`，落盘时 `/` 转为 `_`），拿不到目录时退回扁平标题。
+- GitHub：文件 blob `sha`。远端没给版本信息时不会跳过，宁可重复导入也不漏。
+
+同一 `remote_id` 版本未变化就不会下载、不会建任务；内容真变了会重新入库，旧版本由既有的「同名内容替换」逻辑自动解绑。
+
+### 定时同步与远端删除
+
+```bash
+# 开启每小时同步（需已保存 Token）
+curl -X PUT /api/v1/import/sources/1/schedule -d '{"interval_minutes":60}'
+# {"source":{"id":1,"sync_interval_minutes":60,"next_sync_at":"...","last_error":""}}
+
+# 清理远端已删除的条目
+curl -X POST /api/v1/import/sources/1/cleanup
+# {"removed":1,"failed":[]}
+```
+
+调度器在进程内每分钟扫描一次：取 `sync_interval_minutes > 0` 且 `next_sync_at` 已到期的来源（按到期时间排序，单轮最多 3 个），**先把 `next_sync_at` 顺延再执行**，因此多实例部署时同一来源不会被重复领取。
+
+- 成功：更新 `last_synced_at`，按间隔排下一次，清空 `last_error`。
+- 失败：写入 `last_error`（界面直接展示），并在 5 分钟后重试。
+- 语雀来源必须已保存 Token 才能开启定时；否则接口返回 400 并提示。
+- `import_sources.next_sync_at` 为空且间隔 > 0 时，会在下一轮被领取。
+
+**远端删除的处理**：同步时把远端返回的全部 `remote_id` 与本地 `import_items` 比对，本地有、远端没有的条目写入 `missing_at`（不直接删文档）。来源列表里的 `missing_count` 即待清理数量；`cleanup` 才会真正删除对应文档并移除记录。远端列表为空（例如抓取异常）时不打删除标记。
+
+前端入口：设置 → 自动化 → **定时同步**（`/settings/schedules`），可改间隔、手动同步、清理已删除条目、删除来源。
+
+**网络要求**：服务端需要能访问 `www.yuque.com` 与 `api.github.com`。
+国内网络常无法直连 GitHub，可设置 `HTTPS_PROXY`，或把 `GITHUB_API_BASE` 指向企业版/镜像地址（默认 `https://api.github.com`）。
+
 ### RAG 问答
 
 `POST /api/v1/ask`
@@ -405,7 +502,8 @@ curl '/api/v1/units/unit-xxx/graph?source=entity&doc_id=doc-7a6bfb6fad948db6'
 `/ask`、Agent 的 `vector_search` 工具、MCP 的 `search` 工具、`/retrieve` 共用同一条链路（实现见 `internal/rag`）：
 
 0. **身份校验**：比对 `documents.embedding_model / embedding_dim` 与当前配置。不一致时**不做检索**，直接返回 503 和可操作的重建命令——两套向量混算不会报错，只会让检索质量整体下滑，所以必须在入口拦住。老索引（未登记身份）放行一次并告警。
-1. **并行召回**：向量检索取 `RETRIEVAL_VECTOR_K`（默认 30）；关键词检索走 `chunk_text` 表的 `word_similarity`（pg_trgm，中文按字符三元组匹配）取 `RETRIEVAL_KEYWORD_K`（默认 30）。单路失败自动降级，**全部**通道失败才判定检索失败。
+0. **查询改写**：先用对话模型把问题改写成 1–3 个检索式（去掉疑问词、补齐行业同义表述，例如「国产化」→「信创 安全可靠改造」）。改写失败或超过 4 秒直接退回原问题；`QUERY_REWRITE_ENABLED=false` 可关闭。候选式并行检索后合并去重，再用**原问题**过一遍证据闸门——改写只负责「找得到」，是否「答得上」仍以用户原话为准。
+1. **并行召回**：向量检索取 `RETRIEVAL_VECTOR_K`（默认 30）；关键词检索走 `chunk_text` 表的 `word_similarity`（pg_trgm，中文按字符三元组匹配）取 `RETRIEVAL_KEYWORD_K`（默认 30）。关键词与证据闸门使用去掉疑问词的核心检索式（`normalizeQuery`），避免「适配要求有哪些」因疑问尾巴被误判为无依据。单路失败自动降级，**全部**通道失败才判定检索失败。
 2. **RRF 融合**：按 `1/(60+rank)` 累加两路排名，取前 `RETRIEVAL_FUSION_K`（默认 20）。不依赖分数量纲，异构检索天然可合。
 3. **重排**：`BAAI/bge-reranker-v2-m3`（`RERANK_MODEL`，默认沿用对话模型的端点与密钥）对候选打分，低于 `RERANK_MIN_SCORE`（默认 0.1）的丢弃。重排**未配置或调用失败**时回退到融合顺序，并按 `RETRIEVAL_MAX_DISTANCE`（默认 0.55）过滤。
 4. **证据闸门**：问题与片段的二元组覆盖率低于 `RETRIEVAL_MIN_OVERLAP`（默认 0.28）时丢弃，用于拦下「问的是库里没有的概念，但文本里恰好有同一个作者名」这类误命中。重排分 ≥ 0.5 时不启用该闸门，避免误杀同义改写。
@@ -492,6 +590,33 @@ tools: query_hazards, audit_history
 ### 历史对话
 
 `/agent/chat` 与 `/agent/stream` 的请求可带 `conversation_id` 续写同一会话，不传则自动新建。非流式响应返回 `conversation_id`，流式响应在 `run_started` 事件中返回。服务端会把每轮用户消息和助手回答（含引用）写入 `agent_conversations` / `agent_messages`，写入失败只记日志，不影响回答。请求未携带 `history` 且提供了 `conversation_id` 时，服务端会从 `agent_messages` 回填最近的消息，因此 curl / MCP 等无状态客户端也能续接上下文。
+
+两个与「重来」和「中断」相关的字段：
+
+- `regenerate: true` 表示重新回答上一问：服务端先删除该会话最后一轮「用户提问 + 助手回答」再写入，历史里不会留下同一问题的多条回答。只删成对的两条；最后一条单独是 assistant 时只删它，避免误删失败请求。
+- 客户端中途断开或请求超时时，已流出的部分文本会作为答案落库（`agent_runs.status` 记为 `cancelled` / `timeout`），刷新会话仍能看到已生成的内容。
+
+### 运行保护
+
+| 机制 | 行为 |
+|---|---|
+| 会话互斥 | 同一 `conversation_id` 同时只允许一个 run；冲突返回 **409** `{"error":"该会话正在生成回答，请等当前回答结束后再发送"}` |
+| 工具熔断 | 同一工具连续失败 2 次后，本轮不再提供该工具（模型只能换工具或给结论），避免耗尽步数 |
+| 上下文预算 | 估算 token 超过 `AGENT_CONTEXT_BUDGET`（默认 96000）时，先截断较早的工具结果（保留 1200 字），再压缩更早的历史回复；消息结构不变 |
+| 数值校验 | 答案中的两位数以上数值若在引用片段里找不到，会出现在响应的 `unverified_facts` 与 `run_completed` 事件中，前端提示「建议核对原文」 |
+
+### 断线续传
+
+`GET /api/v1/agent/runs/:id/stream?after=<seq>` 回放该 run 的事件：`seq` 是 SSE 帧里的 `id`，客户端记录最后一个 `id` 即可从该位点继续。
+
+```bash
+curl -N 'http://127.0.0.1:8081/api/v1/agent/runs/4c1a8d3d4a596a25/stream?after=16'
+```
+
+- run 未结束时先回放已有事件，再等待新事件（15 秒心跳保持连接）。
+- run 已结束时回放全部事件后关闭；`after=0` 可以重放整轮，用于复盘或刷新页面后恢复。
+- 事件缓冲保留 10 分钟、最多 100 个 run，过期返回 404，需要重新提问。
+- 注意：HTTP 连接断开会让 run 直接取消，此时续传会收到 `error: 请求已取消`；已生成的部分内容仍已落库。
 
 `GET /api/v1/agent/conversations` 按 `updated_at` 倒序返回最近会话，支持 `unit_id` 过滤与 `limit`（默认 30，上限 100）：
 

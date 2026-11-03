@@ -115,6 +115,125 @@
           </el-form>
         </section>
 
+        <section class="card upload-form-card import-card">
+          <div class="upload-card-heading">
+            <div>
+              <div class="card-title">从语雀 / GitHub 批量导入</div>
+              <div class="muted">抓取内容后进入同一条入库队列；Token 只在本次请求使用，不保存</div>
+            </div>
+          </div>
+
+          <el-tabs v-model="importTab">
+            <el-tab-pane label="语雀" name="yuque">
+              <el-form label-position="top">
+                <el-form-item label="知识库（namespace/仓库名）">
+                  <el-input v-model="importForm.yuqueRepo" placeholder="例如 my-team/product-docs" clearable />
+                </el-form-item>
+                <el-form-item label="Token">
+                  <el-input v-model="importForm.token" type="password" show-password placeholder="语雀 → 设置 → Token" />
+                </el-form-item>
+              </el-form>
+              <div class="import-actions">
+                <el-button
+                  type="primary"
+                  :loading="importing === 'yuque'"
+                  :disabled="!importReady('yuque')"
+                  @click="runImport('yuque')"
+                >
+                  导入语雀文档
+                </el-button>
+                <span class="muted">最多 {{ importForm.limit }} 篇，按目录顺序</span>
+              </div>
+            </el-tab-pane>
+
+            <el-tab-pane label="GitHub" name="github">
+              <el-form label-position="top">
+                <div class="import-grid">
+                  <el-form-item label="Owner">
+                    <el-input v-model="importForm.owner" placeholder="octocat" clearable />
+                  </el-form-item>
+                  <el-form-item label="仓库">
+                    <el-input v-model="importForm.repo" placeholder="hello-world" clearable />
+                  </el-form-item>
+                </div>
+                <div class="import-grid">
+                  <el-form-item label="分支">
+                    <el-input v-model="importForm.ref" placeholder="main" clearable />
+                  </el-form-item>
+                  <el-form-item label="子目录（可选）">
+                    <el-input v-model="importForm.path" placeholder="docs/guide" clearable />
+                  </el-form-item>
+                </div>
+                <el-form-item label="Token（私有仓库必填）">
+                  <el-input v-model="importForm.token" type="password" show-password placeholder="公开仓库可留空" />
+                </el-form-item>
+              </el-form>
+              <div class="import-actions">
+                <el-button
+                  type="primary"
+                  :loading="importing === 'github'"
+                  :disabled="!importReady('github')"
+                  @click="runImport('github')"
+                >
+                  导入仓库文档
+                </el-button>
+                <span class="muted">支持 md / txt / html / csv / json，单文件 ≤ 20MB</span>
+              </div>
+            </el-tab-pane>
+          </el-tabs>
+
+          <div class="import-options">
+            <span class="muted">文档类型</span>
+            <el-select v-model="docType" style="width: 140px" size="small">
+              <el-option v-for="t in types" :key="t" :label="t" :value="t" />
+            </el-select>
+            <span class="muted">条数上限</span>
+            <el-input-number v-model="importForm.limit" :min="1" :max="200" :step="10" size="small" />
+            <span v-if="!unit" class="err">请先在上方选择知识库</span>
+          </div>
+
+          <div class="import-options">
+            <el-button size="small" :loading="savingSource" @click="saveImportSource">保存为来源</el-button>
+            <el-checkbox v-model="importForm.saveToken" size="small">同时保存 Token（明文存储）</el-checkbox>
+            <span class="muted">保存后可一键增量同步，只拉取有变化的文档</span>
+          </div>
+
+          <div v-if="sources.length" class="import-sources">
+            <div class="import-sources-head">已保存的来源</div>
+            <div v-for="src in sources" :key="src.id" class="import-source-row">
+              <div class="import-source-main">
+                <b>{{ src.name }}</b>
+                <span class="muted">
+                  {{ src.kind === 'yuque' ? '语雀' : 'GitHub' }} · {{ src.item_count }} 条
+                  <template v-if="src.last_synced_at"> · {{ new Date(src.last_synced_at).toLocaleString() }}</template>
+                  <template v-else> · 未同步</template>
+                  <template v-if="!src.has_secret"> · 同步需填 Token</template>
+                  <template v-if="src.sync_interval_minutes"> · 每 {{ src.sync_interval_minutes }} 分钟自动同步</template>
+                  <template v-if="src.missing_count"> · <span class="import-missing">上游已删除 {{ src.missing_count }} 条</span></template>
+                </span>
+              </div>
+              <el-button size="small" :loading="syncingId === src.id" @click="syncImportSource(src)">同步</el-button>
+              <el-button size="small" link type="danger" @click="removeImportSource(src)">删除</el-button>
+            </div>
+          </div>
+
+          <div v-if="importResult" class="import-result">
+            <div class="import-summary">
+              已入队 <b>{{ importResult.queued }}</b> 篇 · 跳过 {{ importResult.skipped }} ·
+              失败 {{ importResult.failed?.length || 0 }}
+            </div>
+            <div v-if="importResult.failed?.length" class="import-failures">
+              <div v-for="f in importResult.failed.slice(0, 8)" :key="f.name" class="import-failure">
+                <span class="import-failure-name">{{ f.name }}</span>
+                <span class="err">{{ f.error }}</span>
+              </div>
+              <div v-if="importResult.failed.length > 8" class="muted">
+                …共 {{ importResult.failed.length }} 条失败
+              </div>
+            </div>
+          </div>
+        </section>
+
         <section v-if="job" class="card upload-progress-card">
           <div class="upload-card-heading compact">
             <div>
@@ -231,10 +350,10 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import axios from 'axios'
-import { genFileId } from 'element-plus'
+import { ElMessage, genFileId } from 'element-plus'
 import { jobPhaseLabel, jobStageState } from '../jobPhase'
 import { describeIndexError } from '../utils/indexError'
 
@@ -272,6 +391,159 @@ const file = ref<File | null>(null)
 const fileError = ref('')
 const unitsError = ref('')
 const job = ref<Job | null>(null)
+const importTab = ref('yuque')
+const importing = ref('')
+const importResult = ref<{ queued: number; skipped: number; failed: { name: string; error: string }[] } | null>(null)
+const importForm = reactive({
+  token: '',
+  yuqueRepo: '',
+  owner: '',
+  repo: '',
+  ref: 'main',
+  path: '',
+  limit: 50,
+  saveToken: false,
+})
+
+type ImportSource = {
+  id: number
+  kind: 'yuque' | 'github'
+  name: string
+  has_secret: boolean
+  last_synced_at?: string | null
+  item_count: number
+  missing_count?: number
+  sync_interval_minutes?: number
+}
+const sources = ref<ImportSource[]>([])
+const savingSource = ref(false)
+const syncingId = ref(0)
+
+async function loadImportSources() {
+  if (!unit.value) {
+    sources.value = []
+    return
+  }
+  try {
+    const { data } = await axios.get('/api/v1/import/sources', { params: { unit_id: unit.value } })
+    sources.value = data?.items || []
+  } catch {
+    sources.value = []
+  }
+}
+
+// 保存当前配置为可复用来源；Token 默认不保存。
+async function saveImportSource() {
+  if (!unit.value) {
+    ElMessage.warning('请先选择知识库')
+    return
+  }
+  savingSource.value = true
+  try {
+    const config =
+      importTab.value === 'yuque'
+        ? { repo: importForm.yuqueRepo.trim(), doc_type: docType.value, limit: importForm.limit }
+        : {
+            owner: importForm.owner.trim(),
+            name: importForm.repo.trim(),
+            ref: importForm.ref.trim() || 'main',
+            path: importForm.path.trim(),
+            doc_type: docType.value,
+            limit: importForm.limit,
+          }
+    await axios.post('/api/v1/import/sources', {
+      unit_id: unit.value,
+      kind: importTab.value,
+      config,
+      token: importForm.token,
+      save_token: importForm.saveToken,
+    })
+    ElMessage.success('来源已保存')
+    await loadImportSources()
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || '保存失败')
+  } finally {
+    savingSource.value = false
+  }
+}
+
+// 增量同步：服务端比对远端版本，只下载有变化的条目。
+async function syncImportSource(src: ImportSource) {
+  syncingId.value = src.id
+  try {
+    const { data } = await axios.post(
+      `/api/v1/import/sources/${src.id}/sync`,
+      { token: importForm.token },
+      { timeout: 150000 },
+    )
+    importResult.value = { queued: data.queued, skipped: data.skipped, failed: data.failed || [] }
+    ElMessage.success(`已入队 ${data.queued} 篇，未变化 ${data.unchanged || 0} 篇`)
+    await Promise.all([loadImportSources(), loadRecent()])
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || '同步失败')
+  } finally {
+    syncingId.value = 0
+  }
+}
+
+async function removeImportSource(src: ImportSource) {
+  try {
+    await axios.delete(`/api/v1/import/sources/${src.id}`)
+    await loadImportSources()
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || '删除失败')
+  }
+}
+
+watch(unit, () => {
+  void loadImportSources()
+})
+
+function importReady(kind: 'yuque' | 'github') {
+  if (!unit.value) return false
+  if (kind === 'yuque') return !!importForm.yuqueRepo.trim() && !!importForm.token.trim()
+  return !!importForm.owner.trim() && !!importForm.repo.trim()
+}
+
+// 远程导入：服务端抓取后走同一条入库队列，返回入队/跳过/失败明细。
+async function runImport(kind: 'yuque' | 'github') {
+  if (!unit.value) {
+    ElMessage.warning('请先选择知识库')
+    return
+  }
+  importing.value = kind
+  importResult.value = null
+  try {
+    const payload =
+      kind === 'yuque'
+        ? {
+            unit_id: unit.value,
+            doc_type: docType.value,
+            limit: importForm.limit,
+            token: importForm.token,
+            repo: importForm.yuqueRepo.trim(),
+          }
+        : {
+            unit_id: unit.value,
+            doc_type: docType.value,
+            limit: importForm.limit,
+            token: importForm.token,
+            owner: importForm.owner.trim(),
+            name: importForm.repo.trim(),
+            ref: importForm.ref.trim() || 'main',
+            path: importForm.path.trim(),
+          }
+    const { data } = await axios.post(`/api/v1/import/${kind}`, payload, { timeout: 150000 })
+    importResult.value = data
+    ElMessage.success(`已入队 ${data.queued || 0} 篇`)
+    await loadRecent()
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || '导入失败')
+  } finally {
+    importing.value = ''
+  }
+}
+
 const busy = ref(false)
 const uploader = ref<any>(null)
 const recent = ref<Job[]>([])
@@ -389,6 +661,7 @@ onMounted(async () => {
   const queryUnit = route.query.unit
   if (queryUnit) unit.value = String(queryUnit)
   await loadRecent()
+  await loadImportSources()
   const queryJob = String(route.query.job || '')
   if (queryJob) await openJob(queryJob)
   else await resumeLastJob()
@@ -533,6 +806,99 @@ function resetJob() {
 </script>
 
 <style scoped>
+.import-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 12px;
+}
+.import-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.import-options {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+  font-size: 12.5px;
+}
+.import-sources {
+  margin-top: 12px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+.import-sources-head {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+.import-source-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+}
+.import-source-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 13px;
+}
+.import-source-main b {
+  font-weight: 550;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.import-source-main .muted {
+  font-size: 11.5px;
+}
+.import-missing {
+  color: var(--warning, #b26a00);
+}
+.import-result {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-subtle);
+}
+.import-summary {
+  font-size: 13px;
+}
+.import-failures {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+.import-failure {
+  display: flex;
+  gap: 10px;
+  min-width: 0;
+}
+.import-failure-name {
+  flex: none;
+  max-width: 50%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+}
+@media (max-width: 720px) {
+  .import-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 .upload-page {
   max-width: 1180px;
 }

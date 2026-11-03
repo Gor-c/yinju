@@ -3,6 +3,8 @@ package app
 import (
 	"context"
 	"errors"
+	"sort"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -223,4 +225,73 @@ func (s *Server) embeddingIdentityDescription(ctx context.Context) string {
 	cfg := s.modelConfigFor(ctx)
 	identity := rag.Identity{Model: cfg.EmbedModel, Dim: vectorstore.EmbeddingDim()}
 	return identity.String()
+}
+
+// searchWithRewrite 先用模型把问题改写成多个检索式，再并行召回并合并。
+// 解决「用户说国产化、文档写安全可靠改造」这类术语不一致。
+// 改写失败或关闭时等价于一次普通 hybridSearch。
+func (s *Server) searchWithRewrite(ctx context.Context, docIDs []string, query string, k int) ([]vectorstore.Match, rag.Stats, error) {
+	rewritten := s.rewriteQueries(ctx, query)
+	if len(rewritten) == 0 {
+		return s.hybridSearchWithStats(ctx, docIDs, query, k)
+	}
+	all := make([]string, 0, len(rewritten)+1)
+	all = append(all, query)
+	for _, q := range rewritten {
+		if q != query {
+			all = append(all, q)
+		}
+	}
+
+	type outcome struct {
+		matches []vectorstore.Match
+		stats   rag.Stats
+	}
+	ch := make(chan outcome, len(all))
+	for _, q := range all {
+		go func(query string) {
+			matches, stats, err := s.hybridSearchWithStats(ctx, docIDs, query, k)
+			if err != nil {
+				logging.App().Warn("rewrite_channel_failed", "query", truncateRunes(query, 40), "error", err)
+				ch <- outcome{}
+				return
+			}
+			ch <- outcome{matches: matches, stats: stats}
+		}(q)
+	}
+
+	merged := make([]vectorstore.Match, 0, k*len(all))
+	seen := map[string]int{}
+	total := rag.Stats{}
+	for range all {
+		result := <-ch
+		total.VectorHits += result.stats.VectorHits
+		total.KeywordHits += result.stats.KeywordHits
+		total.Fused += result.stats.Fused
+		total.Reranked += result.stats.Reranked
+		total.Degraded = append(total.Degraded, result.stats.Degraded...)
+		for _, match := range result.matches {
+			key := match.DocID + "#" + strconv.Itoa(match.ChunkIndex)
+			if at, ok := seen[key]; ok {
+				if match.Score > merged[at].Score {
+					merged[at] = match
+				}
+				continue
+			}
+			seen[key] = len(merged)
+			merged = append(merged, match)
+		}
+	}
+	// 不同检索式走的是同一个重排模型，分数可以直接比较。
+	sort.Slice(merged, func(i, j int) bool { return merged[i].Score > merged[j].Score })
+	// 合并结果再用原问题过一遍证据闸门：改写只负责「找得到」，
+	// 是否「答得上」仍由用户原话决定。
+	if pipeline, err := s.retrievalPipeline(ctx); err == nil {
+		merged = pipeline.GateByQuery(query, merged)
+	}
+	if len(merged) > k {
+		merged = merged[:k]
+	}
+	total.Kept = len(merged)
+	return merged, total, nil
 }

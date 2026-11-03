@@ -45,6 +45,10 @@ type Job struct {
 	Chunks   int
 	Attempts int
 
+	// DocID 是这份内容的内容哈希（doc_id）。索引阶段失败时用它清理
+	// 已经写入的部分向量，避免留下检索不到的孤儿数据。
+	DocID string
+
 	// SourceURL records the web page an imported document came from; it stays
 	// empty for ordinary uploads.
 	SourceURL string
@@ -63,6 +67,7 @@ type jobView struct {
 	Message   string     `json:"message"`
 	Chunks    int        `json:"chunks"`
 	Attempts  int        `json:"attempts"`
+	DocID     string     `json:"doc_id,omitempty"`
 	SourceURL string     `json:"source_url,omitempty"`
 	CreatedAt *time.Time `json:"created_at,omitempty"`
 	UpdatedAt *time.Time `json:"updated_at,omitempty"`
@@ -83,6 +88,7 @@ func (j *Job) snapshot() jobView {
 		Message:   j.Message,
 		Chunks:    j.Chunks,
 		Attempts:  j.Attempts,
+		DocID:     j.DocID,
 		SourceURL: j.SourceURL,
 	}
 }
@@ -97,6 +103,12 @@ func (j *Job) set(status string, progress int, message string) {
 	j.Status = status
 	j.Progress = progress
 	j.Message = message
+}
+
+func (j *Job) setDocID(docID string) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.DocID = docID
 }
 
 func (j *Job) setChunks(n int) {
@@ -148,14 +160,15 @@ func (s *Server) persistJob(j *Job) error {
 	view := j.snapshot()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, err := s.db.Exec(ctx, `INSERT INTO index_jobs(job_id,unit_id,doc_type,filename,file_path,status,phase,progress,message,chunks,attempts,source_url,updated_at)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,now())
+	_, err := s.db.Exec(ctx, `INSERT INTO index_jobs(job_id,unit_id,doc_type,filename,file_path,status,phase,progress,message,chunks,attempts,doc_id,source_url,updated_at)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,now())
 		ON CONFLICT(job_id) DO UPDATE
 		SET file_path=EXCLUDED.file_path,status=EXCLUDED.status,phase=EXCLUDED.phase,
 			progress=EXCLUDED.progress,message=EXCLUDED.message,chunks=EXCLUDED.chunks,
-			attempts=EXCLUDED.attempts,source_url=EXCLUDED.source_url,updated_at=now()`,
+			attempts=EXCLUDED.attempts,doc_id=EXCLUDED.doc_id,
+			source_url=EXCLUDED.source_url,updated_at=now()`,
 		view.ID, view.UnitID, view.DocType, view.Filename, view.Path, view.Status, view.Phase,
-		view.Progress, view.Message, view.Chunks, view.Attempts, view.SourceURL)
+		view.Progress, view.Message, view.Chunks, view.Attempts, view.DocID, view.SourceURL)
 	return err
 }
 
@@ -316,14 +329,15 @@ func (s *Server) jobSourcePath(view jobView) string {
 
 func (s *Server) loadJob(ctx context.Context, id string) (*Job, error) {
 	view := jobView{}
-	err := s.db.QueryRow(ctx, `SELECT job_id,unit_id,doc_type,filename,status,phase,progress,message,chunks
+	err := s.db.QueryRow(ctx, `SELECT job_id,unit_id,doc_type,filename,status,phase,progress,message,chunks,doc_id
 		FROM index_jobs WHERE job_id=$1`, id).
-		Scan(&view.ID, &view.UnitID, &view.DocType, &view.Filename, &view.Status, &view.Phase, &view.Progress, &view.Message, &view.Chunks)
+		Scan(&view.ID, &view.UnitID, &view.DocType, &view.Filename, &view.Status, &view.Phase, &view.Progress, &view.Message, &view.Chunks, &view.DocID)
 	if err != nil {
 		return nil, err
 	}
 	return &Job{ID: view.ID, UnitID: view.UnitID, DocType: view.DocType, Filename: view.Filename,
-		Status: view.Status, Phase: view.Phase, Progress: view.Progress, Message: view.Message, Chunks: view.Chunks}, nil
+		Status: view.Status, Phase: view.Phase, Progress: view.Progress, Message: view.Message, Chunks: view.Chunks,
+		DocID: view.DocID}, nil
 }
 
 // jobList 返回最近的索引任务，供前端在切换页面后仍能看到入库进度。
@@ -461,6 +475,43 @@ func (s *Server) retryJob(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"job_id": id, "status": "queued", "message": "重新排队"})
 }
 
+// deleteJob 删除一条失败的任务记录与源文件。
+// 成功的任务请走 DELETE /documents/:doc_id（会连带清理向量与关键词镜像）；
+// 排队中或运行中的任务不允许删除，否则 worker 会拿着已消失的记录继续跑。
+func (s *Server) deleteJob(c *gin.Context) {
+	if !s.ready(c) {
+		return
+	}
+	id := strings.TrimSpace(c.Param("id"))
+	var path, status string
+	err := s.db.QueryRow(c, `SELECT COALESCE(file_path,''),status FROM index_jobs WHERE job_id=$1`, id).Scan(&path, &status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "任务不存在"})
+		return
+	}
+	if err != nil {
+		fail(c, err)
+		return
+	}
+	if status != "failed" {
+		c.JSON(http.StatusConflict, gin.H{"error": "只能删除失败的任务；已完成的文档请在文档库中删除"})
+		return
+	}
+	if path != "" {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			logging.App().Warn("index_job_file_remove_failed", "job_id", id, "path", path, "error", err)
+		}
+	}
+	if _, err := s.db.Exec(c, `DELETE FROM index_jobs WHERE job_id=$1`, id); err != nil {
+		fail(c, err)
+		return
+	}
+	s.jobs.Delete(id)
+	logging.App().Info("index_job_deleted",
+		"request_id", c.GetString(requestIDKey), "job_id", id, "filename", filepath.Base(path))
+	c.JSON(http.StatusOK, gin.H{"deleted": true, "job_id": id})
+}
+
 func fileExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir()
@@ -470,6 +521,9 @@ func fileExists(path string) bool {
 func (s *Server) ensureJobSchema(ctx context.Context) {
 	if s.db == nil {
 		return
+	}
+	if _, err := s.db.Exec(ctx, `ALTER TABLE index_jobs ADD COLUMN IF NOT EXISTS doc_id text NOT NULL DEFAULT ''`); err != nil {
+		logging.App().Warn("job_schema_failed", "step", "doc_id", "error", err)
 	}
 	if _, err := s.db.Exec(ctx, `ALTER TABLE index_jobs ADD COLUMN IF NOT EXISTS phase text NOT NULL DEFAULT 'pending'`); err != nil {
 		logging.App().Warn("job_schema_failed", "step", "phase", "error", err)

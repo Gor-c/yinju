@@ -114,6 +114,7 @@
                 <span class="muted failed-reason">{{ describeIndexError(j.message).title }}</span>
               </el-tooltip>
               <el-button link type="primary" size="small" @click="retryIndexJob(j.job_id)">重新解析</el-button>
+              <el-button link type="danger" size="small" @click="deleteIndexJob(j)">删除</el-button>
             </div>
           </div>
 
@@ -418,7 +419,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import axios from 'axios'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { forceCenter, forceCollide, forceLink, forceManyBody, forceSimulation, forceX, forceY } from 'd3-force-3d'
 import DocumentPreview from '../components/DocumentPreview.vue'
 import DocumentExplorer from '../components/DocumentExplorer.vue'
@@ -725,6 +726,27 @@ async function loadDocuments() {
 }
 
 // 重新解析失败任务：源文件已保留，修好解析环境（如 OCR 扫描件）后可直接重跑。
+// 删除失败任务：同时移除源文件，避免历史文件一直占着目录。
+async function deleteIndexJob(job: { job_id: string; filename: string }) {
+  if (!job?.job_id) return
+  try {
+    await ElMessageBox.confirm(
+      '将删除这条失败记录及上传的源文件，之后需要重新上传才能再次解析。',
+      `确定删除「${job.filename}」？`,
+      { type: 'warning', confirmButtonText: '确认删除', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  try {
+    await axios.delete(`/api/v1/jobs/${encodeURIComponent(job.job_id)}`)
+    ElMessage.success('已删除')
+    await refreshAfterDocChange()
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || '删除失败')
+  }
+}
+
 async function retryIndexJob(jobId: string) {
   if (!jobId) return
   try {

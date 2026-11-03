@@ -319,6 +319,25 @@ flowchart TD
 
 队列语义：worker 每 2 秒轮询 + 上传后 `wakeWorker()` 立即触发；`attempts` 限制同一任务被领取的次数，进程重启只回收超过「任务超时 + 1 分钟」的陈旧 `running` 任务，避免多实例互抢；同一 `unit_id + filename` 由进程内文件锁串行处理。`INDEX_CONCURRENCY` 可调并发（默认 1，上限 4）。
 
+**远程导入与定时同步**：语雀 / GitHub 的导入复用同一条队列——抓取内容写成文件后创建 `index_jobs(queued)`，因此去重、重试、共享、删除语义与手工上传完全一致。
+
+```
+导入源(import_sources)  --sync-->  抓取(远端列表 + 变更判断)
+                                      ├─ 语雀：updated_at / 目录树 → 分组/标题.md
+                                      └─ GitHub：blob sha
+                                            ↓
+                                 写文件 + index_jobs(queued)
+                                            ↓
+                     import_items(remote_id, remote_rev) 记录已同步版本
+                                            ↓
+                     远端没有、本地有的条目写 missing_at（不自动删文档）
+```
+
+- 增量判断存 `import_items.remote_rev`；版本未变化不下载、不建任务。
+- 调度器进程内每分钟扫描 `next_sync_at` 到期的来源，**先顺延再执行**，多实例不会重复领取；失败写 `last_error` 并在 5 分钟后重试。
+- 远端删除只做标记（`missing_at`），由用户在「设置 → 定时同步」里确认后 `cleanup` 才真正删除文档。
+- 定时同步要求来源已保存 Token（明文存储在 `import_sources.secret`，仅适合本机或内网）。
+
 ### 1.4 Agent 工具循环与流式回答
 
 ```mermaid
@@ -424,7 +443,8 @@ Vue 3 / Vite
 
 ```mermaid
 flowchart TD
-    Q[用户问题] --> P[并行召回]
+    Q[用户问题] --> RW[查询改写<br/>1-3 个检索式<br/>失败回退原句]
+    RW --> P[并行召回]
     P --> V[向量检索<br/>RETRIEVAL_VECTOR_K=30]
     P --> K[关键词检索<br/>chunk_text + pg_trgm<br/>word_similarity ≥ 0.12]
     V --> R[RRF 融合<br/>1/(60+rank) 取前 20]

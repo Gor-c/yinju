@@ -80,8 +80,13 @@ func (p *Pipeline) Search(ctx context.Context, docIDs []string, query string, k 
 	}
 	tuning := p.Tuning.normalize()
 
+	// 关键词召回与证据闸门使用去掉疑问词的核心检索式：
+	// 「国产化重点内容是哪些」和「国产化重点内容」应当得到同样结果，
+	// 否则同一意图会因为有疑问尾巴而被拒答。向量召回仍用原句。
+	searchQuery := normalizeQuery(query)
+
 	// 嵌入只做一次，所有通道共用，避免多路召回各自重复调用嵌入服务。
-	req := Request{Query: query, DocIDs: docIDs}
+	req := Request{Query: searchQuery, DocIDs: docIDs}
 	if p.Embedder != nil {
 		vectors, err := p.Embedder.Embed(ctx, []string{query})
 		if err != nil {
@@ -147,7 +152,7 @@ func (p *Pipeline) Search(ctx context.Context, docIDs []string, query string, k 
 
 	ranked := p.rerank(ctx, query, fused, tuning)
 	stats.Reranked = len(ranked)
-	ranked = p.applyEvidenceGate(query, ranked, tuning)
+	ranked = p.applyEvidenceGate(searchQuery, ranked, tuning)
 	if len(ranked) > k {
 		ranked = ranked[:k]
 	}
@@ -224,6 +229,13 @@ func (p *Pipeline) rerank(ctx context.Context, query string, candidates []Match,
 		kept = append(kept, match)
 	}
 	return kept
+}
+
+// GateByQuery 用指定问题再过滤一次结果。
+// 多检索式合并后使用：召回可以靠改写放宽，但「片段到底支不支持这个提问」
+// 必须以用户原问题为准，否则改写出来的同义词会把弱相关片段带进上下文。
+func (p *Pipeline) GateByQuery(query string, matches []Match) []Match {
+	return p.applyEvidenceGate(query, matches, p.Tuning.normalize())
 }
 
 // applyEvidenceGate 是重排之后的第二道闸门。
@@ -317,6 +329,27 @@ func filterByDistance(matches []Match, max float64) []Match {
 			continue
 		}
 		out = append(out, match)
+	}
+	return out
+}
+
+// queryStopPhrases 是问句里不携带检索信息的成分。它们会稀释二元组覆盖率，
+// 也会拉低关键词相似度，导致「国产化重点内容是哪些」被拒答而
+// 「国产化重点内容」能命中——同一意图因多了一个疑问尾巴得到相反结果。
+var queryStopPhrases = []string{
+	"是什么意思", "有哪些", "是哪些", "是什么", "怎么样", "为什么", "怎么",
+	"哪些", "哪个", "什么", "如何", "请问", "请帮我", "帮我", "告诉我",
+	"介绍一下", "说明一下", "一下", "麻烦", "谢谢",
+}
+
+// normalizeQuery 去掉疑问与客套成分，得到用于关键词召回与证据校验的核心检索式。
+func normalizeQuery(query string) string {
+	out := strings.TrimSpace(query)
+	for _, phrase := range queryStopPhrases {
+		out = strings.ReplaceAll(out, phrase, "")
+	}
+	if len([]rune(strings.TrimSpace(foldText(out)))) < 2 {
+		return query
 	}
 	return out
 }

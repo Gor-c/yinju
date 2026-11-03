@@ -140,7 +140,7 @@ func (s *Server) ask(c *gin.Context) {
 		fail(c, e)
 		return
 	}
-	matches, e := s.hybridSearch(c, docIDs, in.Question, k)
+	matches, _, e := s.searchWithRewrite(c, docIDs, in.Question, k)
 	if e != nil {
 		fail(c, e)
 		return
@@ -224,7 +224,7 @@ func (s *Server) retrieve(c *gin.Context) {
 		return
 	}
 	started := time.Now()
-	matches, stats, err := s.hybridSearchWithStats(c, docIDs, in.Query, k)
+	matches, stats, err := s.searchWithRewrite(c, docIDs, in.Query, k)
 	if err != nil {
 		fail(c, err)
 		return

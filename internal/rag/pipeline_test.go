@@ -235,3 +235,24 @@ func TestChunkerProducesOverlappingChunks(t *testing.T) {
 		}
 	}
 }
+
+func TestNormalizeQueryStripsQuestionTail(t *testing.T) {
+	cases := map[string]string{
+		"国产化重点内容是哪些": "国产化重点内容",
+		"适配要求有哪些":    "适配要求",
+		"达梦数据库是什么":   "达梦数据库",
+		"介绍一下光缆敷设要求": "光缆敷设要求",
+	}
+	for in, want := range cases {
+		if got := normalizeQuery(in); got != want {
+			t.Fatalf("normalizeQuery(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestNormalizeQueryKeepsShortInput(t *testing.T) {
+	// 洗掉停用词后过短时回退原句，避免把有效查询清空。
+	if got := normalizeQuery("是什么"); got != "是什么" {
+		t.Fatalf("short input should fall back, got %q", got)
+	}
+}

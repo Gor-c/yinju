@@ -47,10 +47,13 @@ type agentChatRequest struct {
 	// WebSearch opts in to external search for this run only. It stays off
 	// unless the server also has a search provider configured.
 	WebSearch bool `json:"web_search"`
+	// Regenerate 表示「重新回答上一问」：先删掉会话最后一轮问答再写入，
+	// 避免历史里出现同一问题多条回答。
+	Regenerate bool `json:"regenerate"`
 }
 
 type agentAnswer struct {
-	Answer         string
+	Answer string
 	// Expert 是本次**实际生效**的专家 ID：请求没指定时会由项目配置回填。
 	// 必须走返回值带出去——runAgent 是按值接收请求的，内部回填的 in.Expert
 	// 传不回调用方，否则响应里会出现「用了专家但字段为空」。
@@ -59,6 +62,9 @@ type agentAnswer struct {
 	Citations      []citation
 	Steps          int
 	ConversationID string
+	// UnverifiedFacts 是答案中出现、但在引用片段里找不到的数值/百分比，
+	// 供前端提示用户核对原文。
+	UnverifiedFacts []string
 }
 
 func bindAgentChat(c *gin.Context) (agentChatRequest, bool) {
@@ -82,6 +88,12 @@ func bindAgentChat(c *gin.Context) (agentChatRequest, bool) {
 // runAgent executes one agent run. When emit is non-nil the caller is expected
 // to stream the events to the client.
 func (s *Server) runAgent(ctx context.Context, in agentChatRequest, runID string, emit func(agent.Event)) (agentAnswer, error) {
+	// 同一会话串行执行：第二个请求直接被拒绝，而不是排队等 3 分钟。
+	if !s.acquireConversation(in.ConversationID) {
+		return agentAnswer{}, errConversationBusy
+	}
+	defer s.releaseConversation(in.ConversationID)
+
 	unitIDs := normalizeUnitIDs(in)
 	if len(unitIDs) > 0 {
 		in.UnitID = unitIDs[0]
@@ -123,6 +135,9 @@ func (s *Server) runAgent(ctx context.Context, in agentChatRequest, runID string
 	messageLimit := s.memoryMessages()
 	if len(in.History) == 0 && in.ConversationID != "" && messageLimit > 0 {
 		in.History = s.loadConversationHistory(ctx, in.ConversationID, messageLimit)
+	}
+	if in.Regenerate {
+		s.dropLastTurn(ctx, in.ConversationID)
 	}
 	s.appendConversationMessage(ctx, in.ConversationID, "user", in.Message, nil, runID)
 
@@ -210,9 +225,10 @@ func (s *Server) runAgentLoop(
 	emit func(agent.Event),
 ) (agentAnswer, error) {
 	runtime := &agent.Runtime{
-		Model:    client,
-		Tools:    registry,
-		MaxSteps: agentMaxSteps(),
+		Model:         client,
+		Tools:         registry,
+		MaxSteps:      agentMaxSteps(),
+		ContextBudget: agentContextBudget(),
 		Emit: func(event agent.Event) {
 			if event.Type == "tool_result" {
 				s.recordAgentStep(runID, event)
@@ -227,16 +243,18 @@ func (s *Server) runAgentLoop(
 	s.finishAgentRun(runID, status, result.Steps, result.Usage, errText)
 	finalAnswer := strings.TrimSpace(result.Answer)
 	citations := collector.snapshot()
+	unverified := unverifiedFacts(finalAnswer, citations)
 	if finalAnswer != "" {
 		s.appendConversationMessage(ctx, in.ConversationID, "assistant", finalAnswer, citations, runID)
 		s.scheduleMemoryCompaction(in.ConversationID)
 	}
 	return agentAnswer{
-		Answer:         finalAnswer,
-		Skills:         skillIDs,
-		Citations:      citations,
-		Steps:          result.Steps,
-		ConversationID: in.ConversationID,
+		Answer:          finalAnswer,
+		UnverifiedFacts: unverified,
+		Skills:          skillIDs,
+		Citations:       citations,
+		Steps:           result.Steps,
+		ConversationID:  in.ConversationID,
 	}, runErr
 }
 
@@ -272,6 +290,15 @@ func (s *Server) newAgentModel() (*agent.OpenAIClient, error) {
 		return nil, errChatConfig
 	}
 	return agent.NewOpenAIClient(base, key, cfg.LLMModel, agentModelHTTP), nil
+}
+
+// agentContextBudget 是单次请求的上下文预算（估算 token），超出后压缩工具结果与历史。
+func agentContextBudget() int {
+	value, err := strconv.Atoi(env("AGENT_CONTEXT_BUDGET", "96000"))
+	if err != nil || value < 8000 {
+		return 96000
+	}
+	return value
 }
 
 func agentMaxSteps() int {
@@ -371,6 +398,8 @@ func (s *Server) respondAgentError(c *gin.Context, err error) {
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 	case errors.Is(err, errDatabaseNotConfigured):
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
+	case errors.Is(err, errConversationBusy):
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 	case errors.Is(err, errChatConfig):
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
 	case errors.Is(err, agent.ErrMaxSteps):
@@ -403,6 +432,11 @@ func (s *Server) agentStream(c *gin.Context) {
 	c.Header("X-Accel-Buffering", "no")
 	c.Status(http.StatusOK)
 
+	runID := newRunID()
+	// 事件进缓冲，客户端断线后可用 run_id + 位点续传。
+	stream := s.streams.create(runID)
+	defer s.streams.finish(runID)
+
 	var writeMu sync.Mutex
 	send := func(event string, payload any) {
 		data, err := json.Marshal(payload)
@@ -411,14 +445,17 @@ func (s *Server) agentStream(c *gin.Context) {
 		}
 		writeMu.Lock()
 		defer writeMu.Unlock()
-		_, _ = fmt.Fprintf(c.Writer, "event: %s\ndata: %s\n\n", event, data)
+		seq := 0
+		if stream != nil {
+			seq = stream.append(event, data)
+		}
+		_, _ = fmt.Fprintf(c.Writer, "id: %d\nevent: %s\ndata: %s\n\n", seq, event, data)
 		flusher.Flush()
 	}
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), agentRunTimeout)
 	defer cancel()
 
-	runID := newRunID()
 	unitIDs := normalizeUnitIDs(in)
 	if len(unitIDs) > 0 {
 		in.UnitID = unitIDs[0]
@@ -465,11 +502,12 @@ func (s *Server) agentStream(c *gin.Context) {
 	}
 	send("citations", gin.H{"run_id": runID, "citations": answer.Citations})
 	send("run_completed", gin.H{
-		"run_id":    runID,
-		"answer":    answer.Answer,
-		"citations": answer.Citations,
-		"skills":    answer.Skills,
-		"steps":     answer.Steps,
+		"run_id":           runID,
+		"answer":           answer.Answer,
+		"citations":        answer.Citations,
+		"skills":           answer.Skills,
+		"steps":            answer.Steps,
+		"unverified_facts": answer.UnverifiedFacts,
 	})
 }
 
@@ -490,6 +528,8 @@ func publicAgentError(err error) string {
 		return "工具调用次数已用完，模型还没给出结论。可以缩小问题范围或指定单个知识库后再试。"
 	case errors.Is(err, agent.ErrEmptyResponse):
 		return "模型返回了空回答，请重试"
+	case errors.Is(err, errConversationBusy):
+		return err.Error()
 	default:
 		return "agent 执行失败"
 	}
@@ -501,4 +541,33 @@ func newRunID() string {
 		return hex.EncodeToString(buf[:])
 	}
 	return fmt.Sprintf("%d", time.Now().UnixNano())
+}
+
+// errConversationBusy 表示同一会话已有 run 在进行中。
+var errConversationBusy = errors.New("该会话正在生成回答，请等当前回答结束后再发送")
+
+// acquireConversation 尝试占用会话；空 ID（新会话）不参与互斥。
+func (s *Server) acquireConversation(conversationID string) bool {
+	if conversationID == "" {
+		return true
+	}
+	s.convMu.Lock()
+	defer s.convMu.Unlock()
+	if s.convBusy == nil {
+		s.convBusy = map[string]struct{}{}
+	}
+	if _, busy := s.convBusy[conversationID]; busy {
+		return false
+	}
+	s.convBusy[conversationID] = struct{}{}
+	return true
+}
+
+func (s *Server) releaseConversation(conversationID string) {
+	if conversationID == "" {
+		return
+	}
+	s.convMu.Lock()
+	defer s.convMu.Unlock()
+	delete(s.convBusy, conversationID)
 }

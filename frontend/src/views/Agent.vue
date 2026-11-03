@@ -242,7 +242,7 @@
           <span v-if="activeTools.length" class="connector-hint" :title="activeToolNames">工具 · {{ activeTools.length }}</span>
           <span class="spacer"></span>
           <span class="hint">{{ busy ? (status || '正在分析…') : 'Enter 发送 · Shift + Enter 换行' }}</span>
-          <button v-if="!busy" class="send-btn" type="button" :disabled="!draft.trim()" aria-label="发送" @click="send">
+          <button v-if="!busy" class="send-btn" type="button" :disabled="!draft.trim()" aria-label="发送" @click="send()">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M12 19V5m0 0-6 6m6-6 6 6" />
             </svg>
@@ -1392,7 +1392,7 @@ async function regenerate() {
   messages.value = messages.value.slice(0, index)
   draft.value = content
   autoScroll = true
-  await send()
+  await send(true)
 }
 
 const unitLabel = (id: string) => units.value.find((u) => u.unit_id === id)?.name || (id || '未关联知识库')
@@ -1471,7 +1471,9 @@ async function removeConversation(row: ConversationItem) {
   }
 }
 
-async function send() {
+// regenerate=true 表示重答上一问：服务端会先删掉最后一轮问答再写入，
+// 历史里不会留下同一问题的多条回答。
+async function send(regenerate = false) {
   const content = draft.value.trim()
   if (!content || busy.value) return
   const generation = ++requestGeneration
@@ -1502,6 +1504,7 @@ async function send() {
         web_search: webSearch.value,
         history,
         conversation_id: conversationId.value,
+        regenerate: regenerate || undefined,
       },
       target,
       activeController.signal,
@@ -1622,6 +1625,10 @@ async function streamAgent(payload: any, target: Msg, signal: AbortSignal, gener
         flushText()
         if (data.answer) target.content = data.answer
         target.citations = data.citations || target.citations || []
+        // 答案里的数值若在引用片段中找不到，给出核对提示（不阻断回答）。
+        if (Array.isArray(data.unverified_facts) && data.unverified_facts.length) {
+          target.notice = `以下数值未在引用片段中找到，建议核对原文：${data.unverified_facts.join('、')}`
+        }
         status.value = ''
         break
       case 'error': {
@@ -1635,9 +1642,13 @@ async function streamAgent(payload: any, target: Msg, signal: AbortSignal, gener
     }
   }
 
-  try {
+  // 记录已收到的事件位点，断线后从这里续传。
+  let lastSeq = 0
+  let finished = false
+
+  const readEvents = async (source: ReadableStreamDefaultReader<Uint8Array>) => {
     for (;;) {
-      const { done, value } = await reader.read()
+      const { done, value } = await source.read()
       if (done) break
       buffer += decoder.decode(value, { stream: true })
       let boundary = buffer.indexOf('\n\n')
@@ -1645,14 +1656,19 @@ async function streamAgent(payload: any, target: Msg, signal: AbortSignal, gener
         const block = buffer.slice(0, boundary)
         buffer = buffer.slice(boundary + 2)
         let event = 'message'
+        let seq = 0
         const dataLines: string[] = []
         for (const line of block.split('\n')) {
           if (line.startsWith('event:')) event = line.slice(6).trim()
+          else if (line.startsWith('id:')) seq = Number(line.slice(3).trim()) || 0
           else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim())
         }
+        if (seq > lastSeq) lastSeq = seq
         if (dataLines.length) {
           try {
-            handle(event, JSON.parse(dataLines.join('\n')))
+            const payload = JSON.parse(dataLines.join('\n'))
+            if (event === 'run_completed' || event === 'error') finished = true
+            handle(event, payload)
           } catch {
             // Ignore malformed frames and keep the stream alive.
           }
@@ -1660,6 +1676,21 @@ async function streamAgent(payload: any, target: Msg, signal: AbortSignal, gener
         boundary = buffer.indexOf('\n\n')
       }
     }
+  }
+
+  try {
+    await readEvents(reader)
+  } catch (error) {
+    // 断线（非用户主动停止）时按位点续传一次，避免整段回答丢失。
+    if (signal.aborted || finished || !target.runId || lastSeq === 0) throw error
+    status.value = '连接中断，正在恢复…'
+    const resumed = await fetch(
+      `/api/v1/agent/runs/${encodeURIComponent(target.runId)}/stream?after=${lastSeq}`,
+      { signal },
+    )
+    if (!resumed.ok || !resumed.body) throw error
+    buffer = ''
+    await readEvents(resumed.body.getReader())
   } finally {
     flushText()
   }

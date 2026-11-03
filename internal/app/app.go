@@ -38,6 +38,14 @@ type Server struct {
 	// workerWake 唤醒队列消费者，避免上传后等待下一次轮询。
 	workerWake chan struct{}
 
+	// convBusy 记录正在生成回答的会话：同一会话并发提问会让消息交错，
+	// 历史与上下文顺序都会乱。
+	convMu   sync.Mutex
+	convBusy map[string]struct{}
+
+	// streams 缓存运行中的 SSE 事件，支持断线后按位点续传。
+	streams *runStreamHub
+
 	// web 为内置 Agent 提供联网搜索；未配置时为 nil，工具不注册。
 	// 生产环境由 web_search_settings 表驱动，测试中可直接注入。
 	web *websearch.Client
@@ -59,7 +67,7 @@ type Server struct {
 var serverStartedAt = time.Now().UTC().Format(time.RFC3339)
 
 func New() (*Server, error) {
-	s := &Server{http: &http.Client{Timeout: 90 * time.Second}}
+	s := &Server{http: &http.Client{Timeout: 90 * time.Second}, convBusy: map[string]struct{}{}, streams: newRunStreamHub()}
 	// Web search is opt-in: without configuration the tool stays unregistered.
 	web, err := websearch.FromEnv()
 	if err != nil {
@@ -87,6 +95,10 @@ func New() (*Server, error) {
 		s.ensureDocumentSchema(context.Background())
 		// 任务阶段列（上传 → 解析 → 索引）。
 		s.ensureJobSchema(context.Background())
+		// 导入源与增量记录：支持从语雀 / GitHub 反复同步。
+		s.ensureImportSourceSchema(context.Background())
+		// 定时同步：每分钟检查一次到期的导入源。
+		go s.runImportScheduler(context.Background())
 		// 关键词镜像表：混合检索的中文召回走 pg_trgm，与向量库实现无关。
 		s.ensureChunkTextSchema(context.Background())
 		// 运行参数表：检索/切块/记忆参数由页面配置，DB 优先于环境变量。
@@ -156,11 +168,23 @@ func (s *Server) routes() *gin.Engine {
 	a.GET("/units/:id/documents/:filename/file", s.documentFile)
 	a.DELETE("/units/:id/documents/:filename", s.deleteDocument)
 	a.POST("/upload", s.upload)
+	// 远程批量导入：抓取后走同一条入库队列。
+	a.POST("/import/yuque", s.importYuque)
+	a.POST("/import/github", s.importGithub)
+	// 可复用的导入源：保存配置后一键增量同步。
+	a.GET("/import/sources", s.importSourceList)
+	a.POST("/import/sources", s.createImportSource)
+	a.DELETE("/import/sources/:id", s.deleteImportSource)
+	a.POST("/import/sources/:id/sync", s.syncImportSource)
+	a.PUT("/import/sources/:id/schedule", s.updateImportSchedule)
+	a.POST("/import/sources/:id/cleanup", s.cleanupImportSource)
 	// 上传与切块的真实限制，供前端展示，避免界面自行硬编码。
 	a.GET("/ingest/config", s.ingestConfig)
 	a.GET("/jobs", s.jobList)
 	a.GET("/jobs/:id", s.job)
 	a.POST("/jobs/:id/retry", s.retryJob)
+	// 删除失败任务记录与源文件（成功任务请删文档）。
+	a.DELETE("/jobs/:id", s.deleteJob)
 	a.POST("/ask", s.ask)
 	a.GET("/agent/config", s.agentConfig)
 	a.GET("/agent/definitions", s.agentDefinitions)
@@ -184,6 +208,8 @@ func (s *Server) routes() *gin.Engine {
 	a.POST("/kb/drafts/:id/accept", s.acceptKnowledgeDraft)
 	a.POST("/kb/drafts/:id/dismiss", s.dismissKnowledgeDraft)
 	a.GET("/agent/runs/:id", s.agentRunDetail)
+	// 断线续传：从 after 指定的位点回放并继续接收。
+	a.GET("/agent/runs/:id/stream", s.resumeAgentStream)
 	a.GET("/connectors", s.connectors)
 	a.GET("/settings/models", s.modelSettings)
 	a.PUT("/settings/models", s.saveModelSettings)
@@ -306,7 +332,7 @@ func unitPayload(row interface{ Scan(...any) error }) (gin.H, error) {
 	return gin.H{
 		"unit_id": id, "name": n, "unit_type": t, "industry": i, "expert_id": expert,
 		"skill_ids": decodeSkillIDs(skillRaw), "tool_names": decodeSkillIDs(toolRaw), "tags": decodeSkillIDs(tagRaw),
-		"created_at": createdAt,
+		"created_at":     createdAt,
 		"document_count": docCount, "chunk_count": chunkCount, "last_indexed_at": lastIndexed,
 		"doc_types": docTypes, "chapter_count": chapterCount, "chapters": chapters, "doc_names": docNames,
 	}, nil

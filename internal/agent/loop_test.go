@@ -333,6 +333,30 @@ func TestRunModelError(t *testing.T) {
 	}
 }
 
+// cancelAfterDeltaModel 模拟「模型已流出部分内容后请求被取消」：
+// 先推一段增量，再返回 context.Canceled。
+type cancelAfterDeltaModel struct {
+	delta string
+}
+
+func (m *cancelAfterDeltaModel) Complete(_ context.Context, _ []Message, _ []ToolDef, onDelta func(string)) (Message, Usage, error) {
+	if onDelta != nil {
+		onDelta(m.delta)
+	}
+	return Message{}, Usage{}, context.Canceled
+}
+
+func TestRunKeepsPartialAnswerWhenCancelled(t *testing.T) {
+	runtime := &Runtime{Model: &cancelAfterDeltaModel{delta: "已确认的部分结论"}, MaxSteps: 3}
+	result, err := runtime.Run(context.Background(), []Message{{Role: "user", Content: "hi"}})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+	if result.Answer != "已确认的部分结论" {
+		t.Fatalf("partial answer lost on cancel: %q", result.Answer)
+	}
+}
+
 func TestMain(m *testing.M) {
 	retryBaseDelay = time.Millisecond
 	os.Exit(m.Run())

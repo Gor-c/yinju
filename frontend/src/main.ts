@@ -16,6 +16,7 @@ import SettingsModels from './views/SettingsModels.vue'
 import SettingsRetrieval from './views/SettingsRetrieval.vue'
 import SettingsMemory from './views/SettingsMemory.vue'
 import SettingsWebSearch from './views/SettingsWebSearch.vue'
+import SettingsSchedules from './views/SettingsSchedules.vue'
 import SettingsBrand from './views/SettingsBrand.vue'
 import SettingsInstance from './views/SettingsInstance.vue'
 import SettingsDrafts from './views/SettingsDrafts.vue'
@@ -45,6 +46,7 @@ const router = createRouter({
         { path: 'memory', component: SettingsMemory },
         { path: 'drafts', component: SettingsDrafts },
         { path: 'web-search', component: SettingsWebSearch },
+        { path: 'schedules', component: SettingsSchedules },
         { path: 'agents', component: AgentDefs },
       ],
     },
